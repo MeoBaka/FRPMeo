@@ -39,7 +39,7 @@ func TestMergedProxyTypesDecodeAsSingleRealProxies(t *testing.T) {
 	for _, p := range cfg.Proxies {
 		got[p.GetBaseConfig().Name] = p.GetBaseConfig().Type
 	}
-	want := map[string]string{
+	want := map[string]string{ //nolint:gosec // G101 false positive: keys are proxy names, not credentials
 		"game":   "tcp+udp",
 		"secret": "stcp+sudp",
 		"plain":  "tcp",

@@ -522,9 +522,7 @@ func (c *PEProxyConfig) Clone() ProxyConfigurer {
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
 	if c.ForcedHosts != nil {
 		out.ForcedHosts = make(map[string]string, len(c.ForcedHosts))
-		for k, v := range c.ForcedHosts {
-			out.ForcedHosts[k] = v
-		}
+		maps.Copy(out.ForcedHosts, c.ForcedHosts)
 	}
 	return &out
 }

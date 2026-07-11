@@ -254,7 +254,7 @@ func (pxy *TCPUDPProxy) runUDPRelay() {
 	// Count distinct UDP source addresses as "connections" for the UDP half.
 	name := pxy.GetName()
 	proxyType := pxy.GetConfigurer().GetBaseConfig().Type
-	tracker := &udp.UDPSessionTracker{
+	tracker := &udp.SessionTracker{
 		OnOpen:      func() { metrics.Server.OpenConnection(name, proxyType) },
 		OnClose:     func() { metrics.Server.CloseConnection(name, proxyType) },
 		IdleTimeout: time.Duration(pxy.serverCfg.UDPSessionTimeout) * time.Second,

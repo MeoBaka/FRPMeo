@@ -40,18 +40,18 @@ func GetContent(m *msg.UDPPacket) (buf []byte, err error) {
 	return m.Content, nil
 }
 
-// UDPSessionTracker observes distinct UDP source addresses seen by
+// SessionTracker observes distinct UDP source addresses seen by
 // ForwardUserConn so a connectionless UDP proxy can still report a meaningful
 // "current connections" count. OnOpen fires when a new source first sends a
 // packet; OnClose fires when that source has been idle for IdleTimeout (default
 // 30s) or when forwarding stops. It is optional — pass nil to disable tracking.
-type UDPSessionTracker struct {
+type SessionTracker struct {
 	OnOpen      func()
 	OnClose     func()
 	IdleTimeout time.Duration
 }
 
-func ForwardUserConn(udpConn *net.UDPConn, readCh <-chan *msg.UDPPacket, sendCh chan<- *msg.UDPPacket, bufSize int, tracker *UDPSessionTracker) {
+func ForwardUserConn(udpConn *net.UDPConn, readCh <-chan *msg.UDPPacket, sendCh chan<- *msg.UDPPacket, bufSize int, tracker *SessionTracker) {
 	// read
 	go func() {
 		for udpMsg := range readCh {
