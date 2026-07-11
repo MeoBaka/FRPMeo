@@ -22,6 +22,7 @@ import (
 	"github.com/fatedier/frp/pkg/config/source"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/msg"
+	"github.com/fatedier/frp/pkg/proto/wire"
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
 
@@ -38,6 +39,15 @@ type Client struct {
 
 func NewClient(options ClientOptions) (*Client, error) {
 	if options.Common != nil {
+		// The virtual client always reaches the server through an in-memory
+		// net.Pipe (see pipeConnector below), which is fully synchronous and
+		// unbuffered. The v2 wire protocol runs a ClientHello/ServerHello
+		// exchange before the Login message is consumed; over an unbuffered
+		// pipe both sides end up blocked on a write at the same time and the
+		// handshake deadlocks. Force the legacy v1 codec, which is a plain
+		// request/response sequence needing no buffering. Encryption would be
+		// pointless here anyway since the pipe never leaves the process.
+		options.Common.Transport.WireProtocol = wire.ProtocolV1
 		if err := options.Common.Complete(); err != nil {
 			return nil, err
 		}
