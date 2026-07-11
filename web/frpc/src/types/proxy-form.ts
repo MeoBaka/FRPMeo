@@ -9,6 +9,7 @@ export interface ProxyFormData {
   // Backend (ProxyBackend)
   localIP: string
   localPort: number | undefined
+  localPortUDP: number | undefined
   pluginType: string
   pluginConfig: Record<string, any>
 
@@ -60,6 +61,9 @@ export interface ProxyFormData {
 
   // XTCP specific (NatTraversalConfig)
   natTraversalDisableAssistedAddrs: boolean
+
+  // MC/PE specific (fork Minecraft types): pe hostname -> local backend map
+  forcedHosts: Array<{ key: string; value: string }>
 }
 
 export interface VisitorFormData {
@@ -87,6 +91,10 @@ export interface VisitorFormData {
   fallbackTo: string
   fallbackTimeoutMs: number | undefined
   natTraversalDisableAssistedAddrs: boolean
+
+  // Plugin (visitor plugin, e.g. virtual_net)
+  pluginType: string
+  pluginConfig: Record<string, any>
 }
 
 export function createDefaultProxyForm(): ProxyFormData {
@@ -136,6 +144,8 @@ export function createDefaultProxyForm(): ProxyFormData {
 
     secretKey: '',
     allowUsers: [],
+    localPortUDP: undefined,
+    forcedHosts: [],
 
     natTraversalDisableAssistedAddrs: false,
   }
@@ -163,5 +173,8 @@ export function createDefaultVisitorForm(): VisitorFormData {
     fallbackTo: '',
     fallbackTimeoutMs: undefined,
     natTraversalDisableAssistedAddrs: false,
+
+    pluginType: '',
+    pluginConfig: {},
   }
 }

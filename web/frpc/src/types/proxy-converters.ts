@@ -100,7 +100,9 @@ export function formToStoreProxy(form: ProxyFormData): ProxyDefinition {
   if (
     (form.type === 'tcp' ||
       form.type === 'udp' ||
-      form.type === 'tcp+udp') &&
+      form.type === 'tcp+udp' ||
+      form.type === 'mc' ||
+      form.type === 'pe') &&
     form.remotePort != null
   ) {
     block.remotePort = form.remotePort
@@ -109,7 +111,8 @@ export function formToStoreProxy(form: ProxyFormData): ProxyDefinition {
   if (
     form.type === 'http' ||
     form.type === 'https' ||
-    form.type === 'tcpmux'
+    form.type === 'tcpmux' ||
+    form.type === 'mc'
   ) {
     if (form.customDomains.length > 0) {
       block.customDomains = form.customDomains.filter(Boolean)
@@ -178,6 +181,23 @@ export function formToStoreProxy(form: ProxyFormData): ProxyDefinition {
     }
   }
 
+  // Fork combined types: separate UDP local port
+  if (
+    (form.type === 'tcp+udp' ||
+      form.type === 'stcp+sudp' ||
+      form.type === 'xtcp+xudp') &&
+    form.localPortUDP != null
+  ) {
+    block.localPortUDP = form.localPortUDP
+  }
+
+  // pe (Bedrock): hostname -> local backend map
+  if (form.type === 'pe' && form.forcedHosts.length > 0) {
+    block.forcedHosts = Object.fromEntries(
+      form.forcedHosts.filter((h) => h.key).map((h) => [h.key, h.value]),
+    )
+  }
+
   return withStoreProxyBlock(
     {
       name: form.name,
@@ -209,6 +229,13 @@ export function formToStoreVisitor(form: VisitorFormData): VisitorDefinition {
   }
   if (form.bindPort != null) {
     block.bindPort = form.bindPort
+  }
+
+  if (form.pluginType) {
+    block.plugin = {
+      type: form.pluginType,
+      ...form.pluginConfig,
+    }
   }
 
   if (
@@ -286,6 +313,10 @@ function getStoreProxyBlock(config: ProxyDefinition): Record<string, any> {
       return config['tcp+udp'] || {}
     case 'stcp+sudp':
       return config['stcp+sudp'] || {}
+    case 'mc':
+      return config.mc || {}
+    case 'pe':
+      return config.pe || {}
   }
 }
 
@@ -330,6 +361,12 @@ function withStoreProxyBlock(
       break
     case 'stcp+sudp':
       payload['stcp+sudp'] = block
+      break
+    case 'mc':
+      payload.mc = block
+      break
+    case 'pe':
+      payload.pe = block
       break
   }
   return payload
@@ -483,6 +520,17 @@ export function storeProxyToForm(config: ProxyDefinition): ProxyFormData {
     form.allowUsers = [c.allowUsers]
   }
 
+  // Fork combined types: UDP local port
+  form.localPortUDP = c.localPortUDP
+
+  // pe (Bedrock): hostname -> local backend map
+  if (c.forcedHosts && typeof c.forcedHosts === 'object') {
+    form.forcedHosts = Object.entries(c.forcedHosts).map(([key, value]) => ({
+      key,
+      value: String(value),
+    }))
+  }
+
   // XTCP NAT traversal
   form.natTraversalDisableAssistedAddrs =
     c.natTraversal?.disableAssistedAddrs || false
@@ -512,6 +560,13 @@ export function storeVisitorToForm(
   form.serverName = c.serverName || ''
   form.bindAddr = c.bindAddr || '127.0.0.1'
   form.bindPort = c.bindPort
+
+  // Plugin (visitor plugin, e.g. virtual_net)
+  if (c.plugin?.type) {
+    form.pluginType = c.plugin.type
+    form.pluginConfig = { ...c.plugin }
+    delete form.pluginConfig.type
+  }
 
   // XTCP specific
   form.protocol = c.protocol || 'quic'
