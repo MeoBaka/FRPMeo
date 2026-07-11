@@ -1,5 +1,5 @@
 ###############################################################################
-# frpc.toml — CLIENT CONFIGURATION FILE (fork MeoBaka/frp, v1.1.1)
+# frpc.toml — CLIENT CONFIGURATION FILE (fork MeoBaka/frp, v1.3.21.0.69.1.20 [DEV])
 # Reference file with per-line explanations. DO NOT run it directly — copy the
 # parts you need. TOML format.
 ###############################################################################
@@ -241,6 +241,42 @@ secretKey = "KEY_PRIV"
 localPort = 22
 # localPortUDP = 22    # (optional) default = localPort
 # (http+https was REMOVED: once you have SSL nobody serves plain http anymore)
+
+# ============ >>> NEW: mc — MINECRAFT host-based routing (real type) <<< ========
+# Route MANY Minecraft (Java Edition) servers through ONE public port, picking the
+# backend by the hostname in the client handshake (like HTTPS routes by TLS SNI).
+# NO frps config needed: the public port is declared HERE via remotePort. Proxies
+# that share the same remotePort share one listener and are routed by customDomains
+# (even across different frpc clients). See https://github.com/fatedier/frp/issues/5390
+[[proxies]]
+name = "mc-survival"
+type = "mc"
+localIP = "127.0.0.1"
+localPort = 25565
+remotePort = 25565                        # public Minecraft port on frps (declared here)
+customDomains = ["survival.example.com"]  # address players connect with
+# A second server sharing the SAME public port, told apart by hostname:
+# [[proxies]]
+# name = "mc-creative"
+# type = "mc"
+# localPort = 25566
+# remotePort = 25565                       # SAME port -> multiplexed by host
+# customDomains = ["creative.example.com"]
+
+# ========= >>> NEW: pe — MINECRAFT BEDROCK host-based routing (real type) <<< ===
+# Bedrock counterpart of "mc". Bedrock is UDP/RakNet and only carries the hostname
+# inside the login packet, so frpc runs a full Bedrock router (gophertunnel): it
+# reads the login ServerAddress and forwards to the matching local server. frps
+# just opens the UDP port and tunnels (no gophertunnel on frps).
+# NOTE: backend Bedrock servers must run in OFFLINE mode (online-mode=false).
+# Inspired by WaterdogPE forced_hosts.
+[[proxies]]
+name = "bedrock"
+type = "pe"
+remotePort = 19132                          # public UDP port on frps
+[proxies.forcedHosts]                        # host the player types -> local Bedrock server
+"survival.example.com" = "127.0.0.1:19133"
+"creative.example.com" = "127.0.0.1:19134"
 
 # ----------------------- example: plugin instead of localPort ---------------
 # [[proxies]]

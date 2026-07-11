@@ -3,13 +3,13 @@
 > This is a **customized fork** of frp (fast reverse proxy).
 > For all the original documentation, architecture, and standard frp features, see the main repo:
 >
-> ### 👉 https://github.com/fatedier/frp
+> ### https://github.com/fatedier/frp
 >
 > This README **only describes the parts that were added/changed** compared to the original frp. Everything else
 > (tcp, udp, http, https, tcpmux, stcp, sudp, xtcp, plugins, the basic dashboard, general
 > installation…) works exactly like the original — read the documentation at the link above.
 
-**Fork version:** `1.1.1` · **Branch:** `meobaka` (based on frp v0.69.1)
+**Fork version:** `1.3.21.0.69.1.20 [DEV]` · **Branch:** `meobaka` (fork 1.2.0 merged onto upstream 0.69.1 line)
 
 ---
 
@@ -17,18 +17,19 @@
 
 | Category | Change |
 |---|---|
-| ➕ New types | `xudp`, `xtcp+xudp`, `tcp+udp`, `stcp+sudp` |
-| 🔒 Security | Default `transport.wireProtocol` switched **v1 → v2** (v1 kept as an option) |
-| 🐛 Bug fix | Reconnect getting stuck after `i/o deadline reached` on v2 (issue [#5355](https://github.com/fatedier/frp/issues/5355)) |
-| 🖥️ Dashboard | frpc admin API + Vue UI with full support for the new types |
-| 📄 Examples | `examples/frpc_example.toml`, `examples/frps_example.toml` (fully commented) |
+| New types | `xudp`, `xtcp+xudp`, `tcp+udp`, `stcp+sudp`, `mc` (Minecraft Java host routing, issue [#5390](https://github.com/fatedier/frp/issues/5390)), `pe` (Minecraft Bedrock host routing) |
+| Security | Default `transport.wireProtocol` switched **v1 → v2** (v1 kept as an option) |
+| Bug fix | Reconnect getting stuck after `i/o deadline reached` on v2 (issue [#5355](https://github.com/fatedier/frp/issues/5355)) |
+| Dashboard | frpc admin API + Vue UI with full support for the new types |
+| Examples | `examples/frpc_example.toml`, `examples/frps_example.toml` (fully commented) |
 
 ---
 
 ## 1. New types
 
-The four types below are **real types** — fully registered on both frpc and frps, and shown as exactly
-**1 proxy** on the dashboard (not "sugar" that silently splits into multiple proxies).
+All the types below are **real types** — fully registered on both frpc and frps. The first four merge
+**TCP+UDP into a single proxy** (shown as exactly **1 proxy** on the dashboard, not "sugar" that silently
+splits into multiple proxies); the last, `mc`, adds **Minecraft host-based routing**.
 
 ### `xudp` — P2P UDP NAT hole punching
 
@@ -134,14 +135,77 @@ bindAddr = "127.0.0.1"
 bindPort = 6100         # opens BOTH TCP and UDP at 127.0.0.1:6100
 ```
 
-**Quick comparison of the 4 types:**
+### `mc` — Minecraft host-based routing (Cloudflare-Spectrum style)
+
+Route **many Minecraft (Java Edition) servers through one public port**, choosing the backend by the
+**hostname in the client handshake** (the address the player typed) — exactly the way HTTPS proxies route
+by TLS SNI. Inspired by [mc-gateway](https://github.com/tursom/mc-gateway); requested in issue
+[#5390](https://github.com/fatedier/frp/issues/5390).
+
+**No frps configuration at all** — the public port is declared on frpc via `remotePort`. frps opens it
+lazily on first use and shares one listener among every `mc` proxy on the same port (even across
+different frpc clients), releasing it when the last one disconnects. `allowPorts` still applies.
+
+```toml
+# frps.toml — NOTHING is needed for Minecraft.
+
+# frpc.toml — each server is one proxy; reuse the same remotePort to multiplex by host.
+[[proxies]]
+name = "survival"
+type = "mc"
+localIP = "127.0.0.1"
+localPort = 25565
+remotePort = 25565                        # public port on frps (declared here, not on frps)
+customDomains = ["survival.example.com"]  # the address players connect with
+
+[[proxies]]
+name = "creative"
+type = "mc"
+localPort = 25566
+remotePort = 25565                        # same port -> shared listener, routed by host
+customDomains = ["creative.example.com"]
+```
+
+Point each domain's DNS at the frps IP; the player just types `survival.example.com` and frps forwards
+the connection — handshake intact — to the matching backend. No visitor needed; `subdomain` also works
+when `subDomainHost` is set on frps.
+
+### `pe` — Minecraft: Bedrock Edition host-routing (UDP/RakNet)
+
+The Bedrock counterpart of `mc`. Bedrock speaks **UDP/RakNet** and only carries the hostname the player
+typed **inside the login packet** (after the RakNet handshake), so — unlike Java `mc` — frps cannot peek
+it. Instead **frpc runs a full Bedrock router** ([gophertunnel](https://github.com/sandertv/gophertunnel)):
+it terminates each connection, reads the login `ServerAddress`, and re-originates to the matching local
+server. frps only opens the public UDP port and tunnels datagrams (it treats `pe` exactly like `udp` — **no
+gophertunnel on frps**). Modeled on [WaterdogPE](https://github.com/WaterdogPE/WaterdogPE) `forced_hosts`.
+
+```toml
+# frps.toml — NOTHING is needed for Bedrock.
+
+# frpc.toml — one public UDP port, many Bedrock servers routed by hostname.
+[[proxies]]
+name = "bedrock"
+type = "pe"
+remotePort = 19132                          # public UDP port on frps
+[proxies.forcedHosts]                        # hostname the player types -> local Bedrock server
+"survival.example.com" = "127.0.0.1:19133"
+"creative.example.com" = "127.0.0.1:19134"
+```
+
+> **Backends must run in offline mode** (`online-mode=false`): the router dials them without an Xbox
+> token, WaterdogPE-style. Bedrock protocol support tracks the bundled gophertunnel version. Only `frpc`
+> carries the Bedrock stack — `frps` stays clean.
+
+**Quick comparison of the 6 types:**
 
 | Type | Path | Visitor needed? | Used for |
 |---|---|---|---|
-| `xudp` | P2P NAT hole punching | ✅ | Low-latency P2P UDP |
-| `xtcp+xudp` | P2P NAT hole punching (1 hole, TCP+UDP), **auto-falls back to relay on difficult NAT** | ✅ | Remote Desktop P2P (reliable) |
-| `tcp+udp` | Relay via a public frps port | ❌ | TCP+UDP services with a public port |
-| `stcp+sudp` | Secret relay via frps | ✅ | Private TCP+UDP services |
+| `xudp` | P2P NAT hole punching | Yes | Low-latency P2P UDP |
+| `xtcp+xudp` | P2P NAT hole punching (1 hole, TCP+UDP), **auto-falls back to relay on difficult NAT** | Yes | Remote Desktop P2P (reliable) |
+| `tcp+udp` | Relay via a public frps port | No | TCP+UDP services with a public port |
+| `stcp+sudp` | Secret relay via frps | Yes | Private TCP+UDP services |
+| `mc` | Host-routed relay via frps (Minecraft Java handshake) | No | Many Java servers on one public port |
+| `pe` | Bedrock router on frpc (frps tunnels UDP) | No | Many Bedrock (PE) servers on one UDP port |
 
 ---
 

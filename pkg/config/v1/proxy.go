@@ -240,6 +240,8 @@ const (
 	ProxyTypeTCPUDP   ProxyType = "tcp+udp"
 	ProxyTypeSTCPSUDP ProxyType = "stcp+sudp"
 	ProxyTypeXTCPXUDP ProxyType = "xtcp+xudp"
+	ProxyTypeMC       ProxyType = "mc"
+	ProxyTypePE       ProxyType = "pe"
 )
 
 var proxyConfigTypeMap = map[ProxyType]reflect.Type{
@@ -255,6 +257,8 @@ var proxyConfigTypeMap = map[ProxyType]reflect.Type{
 	ProxyTypeTCPUDP:   reflect.TypeFor[TCPUDPProxyConfig](),
 	ProxyTypeSTCPSUDP: reflect.TypeFor[STCPSUDPProxyConfig](),
 	ProxyTypeXTCPXUDP: reflect.TypeFor[XTCPXUDPProxyConfig](),
+	ProxyTypeMC:       reflect.TypeFor[MCProxyConfig](),
+	ProxyTypePE:       reflect.TypeFor[PEProxyConfig](),
 }
 
 func NewProxyConfigurerByType(proxyType ProxyType) ProxyConfigurer {
@@ -318,6 +322,9 @@ func (c *UDPProxyConfig) Clone() ProxyConfigurer {
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
 	return &out
 }
+
+func (c *UDPProxyConfig) GetRemotePort() int  { return c.RemotePort }
+func (c *UDPProxyConfig) SetRemotePort(p int) { c.RemotePort = p }
 
 var _ ProxyConfigurer = &TCPUDPProxyConfig{}
 
@@ -433,6 +440,97 @@ func (c *HTTPSProxyConfig) Clone() ProxyConfigurer {
 	out.DomainConfig = c.DomainConfig.Clone()
 	return &out
 }
+
+var _ ProxyConfigurer = &MCProxyConfig{}
+
+// MCProxyConfig routes Minecraft (Java Edition) traffic by the "server address"
+// sent in the client's first handshake packet — the hostname the player typed —
+// exactly the way HTTPS proxies route by TLS SNI. Many Minecraft servers can
+// share a single public frps port (minecraftBindPort): frps reads the
+// handshake, matches CustomDomains/SubDomain, and forwards the intact stream to
+// the frpc that registered that hostname. Inspired by the standalone
+// mc-gateway project.
+type MCProxyConfig struct {
+	ProxyBaseConfig
+	DomainConfig
+
+	// RemotePort is the public Minecraft port that frps opens for this proxy.
+	// It is declared client-side (no frps configuration needed); multiple mc
+	// proxies that share the same RemotePort share one listener and are routed
+	// by the handshake hostname.
+	RemotePort int `json:"remotePort,omitempty"`
+}
+
+func (c *MCProxyConfig) MarshalToMsg(m *msg.NewProxy) {
+	c.ProxyBaseConfig.MarshalToMsg(m)
+
+	m.CustomDomains = c.CustomDomains
+	m.SubDomain = c.SubDomain
+	m.RemotePort = c.RemotePort
+}
+
+func (c *MCProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
+	c.ProxyBaseConfig.UnmarshalFromMsg(m)
+
+	c.CustomDomains = m.CustomDomains
+	c.SubDomain = m.SubDomain
+	c.RemotePort = m.RemotePort
+}
+
+func (c *MCProxyConfig) Clone() ProxyConfigurer {
+	out := *c
+	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+	out.DomainConfig = c.DomainConfig.Clone()
+	return &out
+}
+
+var _ ProxyConfigurer = &PEProxyConfig{}
+
+// PEProxyConfig routes Minecraft: Bedrock Edition (UDP/RakNet) traffic to a
+// backend chosen by the hostname the player typed. Unlike the Java "mc" type,
+// Bedrock carries that hostname only inside the login packet (after the RakNet
+// handshake), so frps cannot peek it. Instead frpc runs a full Bedrock router
+// (gophertunnel) that terminates each connection, reads the login ServerAddress,
+// and re-originates to the matching local server in ForcedHosts. On the wire
+// frps treats this exactly like a "udp" proxy: it opens RemotePort and tunnels
+// datagrams to frpc, which feeds them to the local router. Inspired by
+// WaterdogPE forced_hosts. Backends must run in offline / trust-proxy mode.
+type PEProxyConfig struct {
+	ProxyBaseConfig
+
+	// RemotePort is the public UDP port frps opens (e.g. 19132).
+	RemotePort int `json:"remotePort,omitempty"`
+	// ForcedHosts maps the hostname a player connects with to a local backend
+	// Bedrock server address ("ip:port"). Used only on frpc (frps never sees it).
+	ForcedHosts map[string]string `json:"forcedHosts,omitempty"`
+}
+
+func (c *PEProxyConfig) MarshalToMsg(m *msg.NewProxy) {
+	c.ProxyBaseConfig.MarshalToMsg(m)
+
+	m.RemotePort = c.RemotePort
+}
+
+func (c *PEProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
+	c.ProxyBaseConfig.UnmarshalFromMsg(m)
+
+	c.RemotePort = m.RemotePort
+}
+
+func (c *PEProxyConfig) Clone() ProxyConfigurer {
+	out := *c
+	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+	if c.ForcedHosts != nil {
+		out.ForcedHosts = make(map[string]string, len(c.ForcedHosts))
+		for k, v := range c.ForcedHosts {
+			out.ForcedHosts[k] = v
+		}
+	}
+	return &out
+}
+
+func (c *PEProxyConfig) GetRemotePort() int  { return c.RemotePort }
+func (c *PEProxyConfig) SetRemotePort(p int) { c.RemotePort = p }
 
 type TCPMultiplexerType string
 
