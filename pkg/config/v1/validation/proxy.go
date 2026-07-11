@@ -233,7 +233,7 @@ func validatePEProxyConfigForClient(c *v1.PEProxyConfig) error {
 	return nil
 }
 
-func validatePEProxyConfigForServer(c *v1.PEProxyConfig, s *v1.ServerConfig) error {
+func validatePEProxyConfigForServer(c *v1.PEProxyConfig, _ *v1.ServerConfig) error {
 	if c.RemotePort == 0 {
 		return errors.New("remotePort is required for the pe proxy type")
 	}

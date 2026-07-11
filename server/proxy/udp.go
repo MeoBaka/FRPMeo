@@ -255,7 +255,7 @@ func (pxy *UDPProxy) Run() (remoteAddr string, err error) {
 	// connectionless, so without this the dashboard would always show 0).
 	name := pxy.GetName()
 	proxyType := pxy.GetConfigurer().GetBaseConfig().Type
-	tracker := &udp.UDPSessionTracker{
+	tracker := &udp.SessionTracker{
 		OnOpen:      func() { metrics.Server.OpenConnection(name, proxyType) },
 		OnClose:     func() { metrics.Server.CloseConnection(name, proxyType) },
 		IdleTimeout: time.Duration(pxy.serverCfg.UDPSessionTimeout) * time.Second,

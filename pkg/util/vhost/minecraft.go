@@ -115,7 +115,7 @@ func readHandshakeServerHost(r io.Reader) (string, error) {
 func readVarIntStream(r io.Reader) (int, error) {
 	var value int
 	var b [1]byte
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if _, err := io.ReadFull(r, b[:]); err != nil {
 			return 0, err
 		}
@@ -131,7 +131,7 @@ func readVarIntStream(r io.Reader) (int, error) {
 // bit set means another byte follows.
 func readVarIntBuf(buf []byte) (int, int, error) {
 	var value int
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if i >= len(buf) {
 			return 0, 0, errors.New("incomplete varint")
 		}
