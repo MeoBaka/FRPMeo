@@ -1,0 +1,1 @@
+{"default":"allow","rules":[{"id":"block-badasn","action":"deny","cidr":"45.0.0.0/8","note":"example bad range"}]}

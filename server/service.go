@@ -50,6 +50,7 @@ import (
 	"github.com/fatedier/frp/pkg/util/vhost"
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server/controller"
+	"github.com/fatedier/frp/server/firewall"
 	"github.com/fatedier/frp/server/group"
 	"github.com/fatedier/frp/server/metrics"
 	"github.com/fatedier/frp/server/ports"
@@ -181,6 +182,13 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	}
 	if webServer != nil {
 		webServer.RouteRegister(svr.registerRouteHandlers)
+	}
+
+	// Native firewall for user-connection access control (rules managed from
+	// the dashboard, persisted to a JSON file next to frps).
+	var fwErr error
+	if svr.rc.Firewall, fwErr = firewall.New("frps_firewall.json"); fwErr != nil {
+		return nil, fmt.Errorf("init firewall: %v", fwErr)
 	}
 
 	// Create tcpmux httpconnect multiplexer.

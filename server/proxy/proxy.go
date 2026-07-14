@@ -285,6 +285,13 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 		ProxyType:  cfg.Type,
 		RemoteAddr: userConn.RemoteAddr().String(),
 	}
+	// Native firewall: reject the user connection before it reaches the tunnel.
+	if fw := rc.Firewall; fw != nil {
+		if ok, reason := fw.Allow(content.RemoteAddr, content.ProxyName, content.User.User); !ok {
+			xl.Warnf("user conn [%s] to proxy [%s] rejected by firewall: %s", content.RemoteAddr, content.ProxyName, reason)
+			return
+		}
+	}
 	_, err := rc.PluginManager.NewUserConn(content)
 	if err != nil {
 		xl.Warnf("the user conn [%s] was rejected, err:%v", content.RemoteAddr, err)

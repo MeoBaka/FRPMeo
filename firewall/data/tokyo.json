@@ -1,0 +1,7 @@
+{
+  "default": "deny",
+  "rules": [
+    { "id": "office", "action": "allow", "cidr": "1.2.3.0/24", "proxy": "rdp-*", "note": "office network can reach RDP" },
+    { "id": "admin-any", "action": "allow", "user": "admin", "note": "admin user allowed anywhere" }
+  ]
+}
