@@ -1,5 +1,5 @@
 ###############################################################################
-# frpc.toml — CLIENT CONFIGURATION FILE (fork MeoBaka/frp, v1.4.25.0.70.0.0 [DEV])
+# frpc.toml — CLIENT CONFIGURATION FILE (fork MeoBaka/frp, v1.5.29.0.70.0.0 [DEV])
 # Reference file with per-line explanations. DO NOT run it directly — copy the
 # parts you need. TOML format.
 ###############################################################################
