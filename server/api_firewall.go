@@ -24,37 +24,39 @@ import (
 	"github.com/fatedier/frp/server/firewall"
 )
 
-// GET /api/firewall - return the current rule set.
+// GET /api/firewall - current firewall config (enabled, default, rules, provider).
 func (svr *Service) apiFirewallGet(w http.ResponseWriter, _ *http.Request) {
-	apiWriteJSON(w, http.StatusOK, svr.rc.Firewall.Get())
+	apiWriteJSON(w, http.StatusOK, svr.rc.Firewall.Snapshot())
 }
 
-// PUT /api/firewall - replace the rule set (and persist it).
+// PUT /api/firewall - replace enabled/default/rules/provider.
 func (svr *Service) apiFirewallPut(w http.ResponseWriter, r *http.Request) {
-	var rs firewall.RuleSet
-	if err := json.NewDecoder(r.Body).Decode(&rs); err != nil {
+	var body struct {
+		Enabled  bool                    `json:"enabled"`
+		Default  string                  `json:"default"`
+		Rules    []firewall.Rule         `json:"rules"`
+		Provider firewall.ProviderConfig `json:"provider"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
-	if rs.Default != "allow" && rs.Default != "deny" {
-		rs.Default = "allow"
-	}
-	for i := range rs.Rules {
-		a := strings.ToLower(rs.Rules[i].Action)
+	for i := range body.Rules {
+		a := strings.ToLower(body.Rules[i].Action)
 		if a != "allow" && a != "deny" {
 			apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "rule action must be allow or deny"})
 			return
 		}
-		rs.Rules[i].Action = a
-		if rs.Rules[i].ID == "" {
-			rs.Rules[i].ID = fwRandID()
+		body.Rules[i].Action = a
+		if body.Rules[i].ID == "" {
+			body.Rules[i].ID = fwRandID()
 		}
 	}
-	if err := svr.rc.Firewall.Set(rs); err != nil {
+	if err := svr.rc.Firewall.SetConfig(body.Enabled, body.Default, body.Rules, body.Provider); err != nil {
 		apiWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	apiWriteJSON(w, http.StatusOK, map[string]any{"ok": true, "rules": len(rs.Rules)})
+	apiWriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func apiWriteJSON(w http.ResponseWriter, code int, v any) {

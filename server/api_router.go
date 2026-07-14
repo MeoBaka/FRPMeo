@@ -48,7 +48,7 @@ func (svr *Service) registerRouteHandlers(helper *httppkg.RouterRegisterHelper) 
 	subRouter.HandleFunc("/api/clients/{key}", httppkg.MakeHTTPHandlerFunc(apiController.APIClientDetail)).Methods("GET")
 	subRouter.HandleFunc("/api/proxies", httppkg.MakeHTTPHandlerFunc(apiController.DeleteProxies)).Methods("DELETE")
 
-	// native firewall (access-control rules)
+	// native firewall (dashboard, behind basic auth)
 	subRouter.HandleFunc("/api/firewall", svr.apiFirewallGet).Methods("GET")
 	subRouter.HandleFunc("/api/firewall", svr.apiFirewallPut).Methods("PUT")
 
