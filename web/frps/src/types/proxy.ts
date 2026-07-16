@@ -81,6 +81,28 @@ export type ProxyV2SUDPBlock = ProxyV2BaseSpec
 
 export type ProxyV2XTCPBlock = ProxyV2BaseSpec
 
+// Fork-only proxy types.
+
+export type ProxyV2XUDPBlock = ProxyV2BaseSpec
+
+export interface ProxyV2TCPUDPBlock extends ProxyV2BaseSpec {
+  remotePort?: number
+}
+
+export type ProxyV2STCPSUDPBlock = ProxyV2BaseSpec
+
+export type ProxyV2XTCPXUDPBlock = ProxyV2BaseSpec
+
+export interface ProxyV2MCBlock extends ProxyV2BaseSpec {
+  remotePort?: number
+  customDomains?: string[]
+  subdomain?: string
+}
+
+export interface ProxyV2PEBlock extends ProxyV2BaseSpec {
+  remotePort?: number
+}
+
 export interface ProxyV2SpecBlocks {
   tcp: ProxyV2TCPBlock
   udp: ProxyV2UDPBlock
@@ -90,6 +112,12 @@ export interface ProxyV2SpecBlocks {
   stcp: ProxyV2STCPBlock
   sudp: ProxyV2SUDPBlock
   xtcp: ProxyV2XTCPBlock
+  xudp: ProxyV2XUDPBlock
+  'tcp+udp': ProxyV2TCPUDPBlock
+  'stcp+sudp': ProxyV2STCPSUDPBlock
+  'xtcp+xudp': ProxyV2XTCPXUDPBlock
+  mc: ProxyV2MCBlock
+  pe: ProxyV2PEBlock
 }
 
 export type ProxyV2Type = keyof ProxyV2SpecBlocks

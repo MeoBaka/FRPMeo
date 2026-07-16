@@ -673,6 +673,17 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 			log.Warnf("listener for incoming connections from client closed")
 			return
 		}
+		// Native firewall: drop blocked clients before the TLS handshake.
+		// Skipped for internal listeners (ssh tunnel gateway), which are not
+		// real remote peers.
+		if !internal && svr.rc.Firewall != nil {
+			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String()); !ok {
+				log.Warnf("client conn [%s] to control port rejected by firewall: %s", c.RemoteAddr(), reason)
+				c.Close()
+				continue
+			}
+		}
+
 		// inject xlog object into net.Conn context
 		xl := xlog.New()
 		ctx := context.Background()
@@ -731,6 +742,14 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 		if err != nil {
 			log.Warnf("quic listener for incoming connections from client closed")
 			return
+		}
+		// Native firewall: drop blocked clients before any stream is accepted.
+		if svr.rc.Firewall != nil {
+			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String()); !ok {
+				log.Warnf("client conn [%s] to quic control port rejected by firewall: %s", c.RemoteAddr(), reason)
+				_ = c.CloseWithError(0, "")
+				continue
+			}
 		}
 		// Start a new goroutine to handle connection.
 		go func(ctx context.Context, frpConn *quic.Conn) {

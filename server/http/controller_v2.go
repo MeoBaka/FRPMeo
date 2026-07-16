@@ -44,6 +44,10 @@ const (
 	v2ProxyTrafficGranularity       = "day"
 )
 
+// apiV2ProxyTypes is every proxy type v2 knows about. An unfiltered
+// /api/v2/proxies walks this list to collect proxies, so a type missing here is
+// invisible to the API even while frps is serving it - keep it in step with
+// v1.proxyConfigTypeMap.
 var apiV2ProxyTypes = []string{
 	string(v1.ProxyTypeTCP),
 	string(v1.ProxyTypeUDP),
@@ -53,6 +57,13 @@ var apiV2ProxyTypes = []string{
 	string(v1.ProxyTypeSTCP),
 	string(v1.ProxyTypeXTCP),
 	string(v1.ProxyTypeSUDP),
+	// Fork-only types.
+	string(v1.ProxyTypeXUDP),
+	string(v1.ProxyTypeTCPUDP),
+	string(v1.ProxyTypeSTCPSUDP),
+	string(v1.ProxyTypeXTCPXUDP),
+	string(v1.ProxyTypeMC),
+	string(v1.ProxyTypePE),
 }
 
 // /api/v2/system/info
@@ -362,7 +373,8 @@ func parseV2ProxyTypeFilter(raw string) (string, error) {
 	if slices.Contains(apiV2ProxyTypes, proxyType) {
 		return proxyType, nil
 	}
-	return "", httppkg.NewError(http.StatusBadRequest, "type must be one of tcp, udp, http, https, tcpmux, stcp, xtcp, sudp")
+	// Built from the list itself, so it cannot drift out of date.
+	return "", httppkg.NewError(http.StatusBadRequest, "type must be one of "+strings.Join(apiV2ProxyTypes, ", "))
 }
 
 func parseV2SystemPruneType(raw string) (string, error) {
@@ -625,6 +637,47 @@ func buildV2ProxySpec(proxyType string, cfg v1.ProxyConfigurer) model.V2ProxySpe
 			block.V2ProxyBaseSpec = buildV2ProxyBaseSpec(c.GetBaseConfig())
 		}
 		spec.XTCP = block
+	case string(v1.ProxyTypeXUDP):
+		block := &model.V2XUDPProxySpec{}
+		if c, ok := cfg.(*v1.XUDPProxyConfig); ok {
+			block.V2ProxyBaseSpec = buildV2ProxyBaseSpec(c.GetBaseConfig())
+		}
+		spec.XUDP = block
+	case string(v1.ProxyTypeTCPUDP):
+		block := &model.V2TCPUDPProxySpec{}
+		if c, ok := cfg.(*v1.TCPUDPProxyConfig); ok {
+			block.V2ProxyBaseSpec = buildV2ProxyBaseSpec(c.GetBaseConfig())
+			block.RemotePort = &c.RemotePort
+		}
+		spec.TCPUDP = block
+	case string(v1.ProxyTypeSTCPSUDP):
+		block := &model.V2STCPSUDPProxySpec{}
+		if c, ok := cfg.(*v1.STCPSUDPProxyConfig); ok {
+			block.V2ProxyBaseSpec = buildV2ProxyBaseSpec(c.GetBaseConfig())
+		}
+		spec.STCPSUDP = block
+	case string(v1.ProxyTypeXTCPXUDP):
+		block := &model.V2XTCPXUDPProxySpec{}
+		if c, ok := cfg.(*v1.XTCPXUDPProxyConfig); ok {
+			block.V2ProxyBaseSpec = buildV2ProxyBaseSpec(c.GetBaseConfig())
+		}
+		spec.XTCPXUDP = block
+	case string(v1.ProxyTypeMC):
+		block := &model.V2MCProxySpec{}
+		if c, ok := cfg.(*v1.MCProxyConfig); ok {
+			block.V2ProxyBaseSpec = buildV2ProxyBaseSpec(c.GetBaseConfig())
+			block.RemotePort = &c.RemotePort
+			block.CustomDomains = slices.Clone(c.CustomDomains)
+			block.Subdomain = c.SubDomain
+		}
+		spec.MC = block
+	case string(v1.ProxyTypePE):
+		block := &model.V2PEProxySpec{}
+		if c, ok := cfg.(*v1.PEProxyConfig); ok {
+			block.V2ProxyBaseSpec = buildV2ProxyBaseSpec(c.GetBaseConfig())
+			block.RemotePort = &c.RemotePort
+		}
+		spec.PE = block
 	}
 
 	return spec

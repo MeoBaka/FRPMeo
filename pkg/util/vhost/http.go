@@ -270,6 +270,10 @@ func (rp *HTTPReverseProxy) injectRequestInfoToCtx(req *http.Request) *http.Requ
 func (rp *HTTPReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	newreq := rp.injectRequestInfoToCtx(req)
 	rc := newreq.Context().Value(RouteConfigKey).(*RouteConfig)
+	if rc != nil && rc.AllowFn != nil && !rc.AllowFn(req.RemoteAddr) {
+		http.Error(rw, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
 	if !checkRouteAuthByRequest(req, rc) {
 		if req.URL.Host != "" {
 			rw.Header().Set("Proxy-Authenticate", `Basic realm="Restricted"`)

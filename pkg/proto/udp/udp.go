@@ -51,7 +51,19 @@ type SessionTracker struct {
 	IdleTimeout time.Duration
 }
 
-func ForwardUserConn(udpConn *net.UDPConn, readCh <-chan *msg.UDPPacket, sendCh chan<- *msg.UDPPacket, bufSize int, tracker *SessionTracker) {
+// ForwardUserConn relays packets between a public UDP socket and the work
+// connection channels. allow, when non-nil, is consulted for every packet's
+// source address; a false verdict drops the packet silently (UDP has no way to
+// signal a rejection). Callers are expected to cache their verdicts - this is
+// the per-packet hot path.
+func ForwardUserConn(
+	udpConn *net.UDPConn,
+	readCh <-chan *msg.UDPPacket,
+	sendCh chan<- *msg.UDPPacket,
+	bufSize int,
+	tracker *SessionTracker,
+	allow func(remoteAddr string) bool,
+) {
 	// read
 	go func() {
 		for udpMsg := range readCh {
@@ -112,6 +124,9 @@ func ForwardUserConn(udpConn *net.UDPConn, readCh <-chan *msg.UDPPacket, sendCh 
 		n, remoteAddr, err := udpConn.ReadFromUDP(buf)
 		if err != nil {
 			return
+		}
+		if allow != nil && remoteAddr != nil && !allow(remoteAddr.String()) {
+			continue
 		}
 		if tracker != nil && remoteAddr != nil {
 			key := remoteAddr.String()

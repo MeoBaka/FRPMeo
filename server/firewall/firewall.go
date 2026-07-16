@@ -102,18 +102,20 @@ func (p ProviderConfig) effective() ProviderConfig {
 }
 
 type state struct {
-	Enabled  *bool          `json:"enabled,omitempty"` // nil = enabled
-	Default  string         `json:"default"`
-	Rules    []Rule         `json:"rules"`
-	Provider ProviderConfig `json:"provider"`
+	Enabled     *bool          `json:"enabled,omitempty"` // nil = enabled
+	ControlPort bool           `json:"controlPort"`
+	Default     string         `json:"default"`
+	Rules       []Rule         `json:"rules"`
+	Provider    ProviderConfig `json:"provider"`
 }
 
 // Snapshot is returned to the dashboard.
 type Snapshot struct {
-	Enabled  bool           `json:"enabled"`
-	Default  string         `json:"default"`
-	Rules    []Rule         `json:"rules"`
-	Provider ProviderConfig `json:"provider"`
+	Enabled     bool           `json:"enabled"`
+	ControlPort bool           `json:"controlPort"`
+	Default     string         `json:"default"`
+	Rules       []Rule         `json:"rules"`
+	Provider    ProviderConfig `json:"provider"`
 }
 
 type repEntry struct {
@@ -127,11 +129,12 @@ type Firewall struct {
 	path  string
 	nowFn func() int64
 
-	enabled  bool
-	def      string
-	rules    []Rule
-	provider ProviderConfig
-	client   *http.Client
+	enabled     bool
+	controlPort bool
+	def         string
+	rules       []Rule
+	provider    ProviderConfig
+	client      *http.Client
 
 	repMu    sync.Mutex
 	repCache map[string]repEntry
@@ -154,6 +157,7 @@ func New(path string) (*Firewall, error) {
 			return nil, err
 		}
 		f.enabled = s.Enabled == nil || *s.Enabled
+		f.controlPort = s.ControlPort
 		f.def = orDefault(strings.ToLower(s.Default), "allow")
 		f.rules = s.Rules
 		f.provider = s.Provider
@@ -184,6 +188,21 @@ func (f *Firewall) sweep() {
 		}
 		f.mu.Unlock()
 	}
+}
+
+// AllowControl decides whether an frpc client may connect to the frps control
+// port at all (checked on accept, before login). It is opt-in via the
+// controlPort toggle: protecting the control port with a deny-by-default policy
+// locks out every client, so existing setups keep the old behavior until asked.
+// Only IP-scoped rules can match here - there is no proxy or user yet.
+func (f *Firewall) AllowControl(remoteAddr string) (bool, string) {
+	f.mu.RLock()
+	on := f.enabled && f.controlPort
+	f.mu.RUnlock()
+	if !on {
+		return true, "control port not protected"
+	}
+	return f.Allow(remoteAddr, "", "")
 }
 
 // Allow decides whether a user connection is permitted.
@@ -341,11 +360,11 @@ func (f *Firewall) Snapshot() Snapshot {
 	defer f.mu.RUnlock()
 	rules := make([]Rule, len(f.rules))
 	copy(rules, f.rules)
-	return Snapshot{Enabled: f.enabled, Default: f.def, Rules: rules, Provider: f.provider}
+	return Snapshot{Enabled: f.enabled, ControlPort: f.controlPort, Default: f.def, Rules: rules, Provider: f.provider}
 }
 
-// SetConfig replaces enabled/default/rules/provider.
-func (f *Firewall) SetConfig(enabled bool, def string, rules []Rule, provider ProviderConfig) error {
+// SetConfig replaces enabled/controlPort/default/rules/provider.
+func (f *Firewall) SetConfig(enabled, controlPort bool, def string, rules []Rule, provider ProviderConfig) error {
 	def = strings.ToLower(def)
 	if def != "allow" && def != "deny" {
 		def = "allow"
@@ -356,6 +375,7 @@ func (f *Firewall) SetConfig(enabled bool, def string, rules []Rule, provider Pr
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.enabled = enabled
+	f.controlPort = controlPort
 	f.def = def
 	f.rules = rules
 	f.provider = provider
@@ -396,7 +416,7 @@ func (f *Firewall) saveLocked() error {
 		return nil
 	}
 	enabled := f.enabled
-	s := state{Enabled: &enabled, Default: f.def, Rules: f.rules, Provider: f.provider}
+	s := state{Enabled: &enabled, ControlPort: f.controlPort, Default: f.def, Rules: f.rules, Provider: f.provider}
 	if s.Rules == nil {
 		s.Rules = []Rule{}
 	}

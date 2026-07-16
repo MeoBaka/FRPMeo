@@ -92,6 +92,14 @@ type V2ProxySpec struct {
 	STCP   *V2STCPProxySpec   `json:"stcp,omitempty"`
 	SUDP   *V2SUDPProxySpec   `json:"sudp,omitempty"`
 	XTCP   *V2XTCPProxySpec   `json:"xtcp,omitempty"`
+
+	// Fork-only proxy types.
+	XUDP     *V2XUDPProxySpec     `json:"xudp,omitempty"`
+	TCPUDP   *V2TCPUDPProxySpec   `json:"tcp+udp,omitempty"`
+	STCPSUDP *V2STCPSUDPProxySpec `json:"stcp+sudp,omitempty"`
+	XTCPXUDP *V2XTCPXUDPProxySpec `json:"xtcp+xudp,omitempty"`
+	MC       *V2MCProxySpec       `json:"mc,omitempty"`
+	PE       *V2PEProxySpec       `json:"pe,omitempty"`
 }
 
 type V2ProxyBaseSpec struct {
@@ -154,6 +162,41 @@ type V2SUDPProxySpec struct {
 
 type V2XTCPProxySpec struct {
 	V2ProxyBaseSpec
+}
+
+// Fork-only proxy types. As with stcp/sudp/xtcp above, the secret key is never
+// exposed here - it is a credential, not status.
+
+type V2XUDPProxySpec struct {
+	V2ProxyBaseSpec
+}
+
+type V2TCPUDPProxySpec struct {
+	V2ProxyBaseSpec
+	RemotePort *int `json:"remotePort,omitempty"`
+}
+
+type V2STCPSUDPProxySpec struct {
+	V2ProxyBaseSpec
+}
+
+type V2XTCPXUDPProxySpec struct {
+	V2ProxyBaseSpec
+}
+
+// V2MCProxySpec describes a Minecraft Java proxy. Several mc proxies may share
+// one RemotePort and be told apart by the handshake hostname, so the domains
+// are as much a part of the address as the port is.
+type V2MCProxySpec struct {
+	V2ProxyBaseSpec
+	RemotePort    *int     `json:"remotePort,omitempty"`
+	CustomDomains []string `json:"customDomains,omitempty"`
+	Subdomain     string   `json:"subdomain,omitempty"`
+}
+
+type V2PEProxySpec struct {
+	V2ProxyBaseSpec
+	RemotePort *int `json:"remotePort,omitempty"`
 }
 
 type V2ProxyStatusResp struct {

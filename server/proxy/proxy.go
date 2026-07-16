@@ -35,6 +35,7 @@ import (
 	"github.com/fatedier/frp/pkg/proto/wire"
 	"github.com/fatedier/frp/pkg/util/limit"
 	netpkg "github.com/fatedier/frp/pkg/util/net"
+	"github.com/fatedier/frp/pkg/util/vhost"
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server/controller"
 	"github.com/fatedier/frp/server/metrics"
@@ -268,6 +269,85 @@ func (pxy *BaseProxy) startCommonTCPListenersHandler() {
 				go pxy.handleUserTCPConnection(c)
 			}
 		}(listener)
+	}
+}
+
+const (
+	// How long a per-source firewall verdict is reused on the UDP path. UDP is
+	// packet-based, so consulting the firewall for every packet would put a
+	// lock (and possibly a reputation lookup) in the hot path. The cost is that
+	// a rule change takes up to this long to affect an in-flight UDP source.
+	udpFirewallVerdictTTL = 2 * time.Second
+	// Cap on remembered UDP sources: the source address of a UDP packet is
+	// trivially spoofed, so the cache must not grow without bound.
+	udpFirewallVerdictMax = 4096
+)
+
+// newUDPFirewallFilter returns a per-source firewall predicate for the UDP
+// proxies (udp, pe, and the UDP half of tcp+udp), which have their own read
+// loop and never reach handleUserTCPConnection. Verdicts are cached because
+// this runs per packet. It returns nil when no firewall is configured, so the
+// caller pays nothing.
+func (pxy *BaseProxy) newUDPFirewallFilter() func(string) bool {
+	return pxy.newFirewallFilter("udp packets from", udpFirewallVerdictTTL)
+}
+
+// newHTTPFirewallFilter returns a per-request firewall predicate for http
+// proxies, which are served by the vhost reverse proxy and never reach
+// handleUserTCPConnection either. The reverse proxy pools work connections, so
+// this has to be per request rather than per connection.
+func (pxy *BaseProxy) newHTTPFirewallFilter() vhost.AllowFunc {
+	return pxy.newFirewallFilter("user conn", 0)
+}
+
+// newFirewallFilter builds a firewall predicate keyed by source address. A
+// non-zero ttl caches verdicts for that long, trading rule-change latency for
+// not consulting the firewall on every packet; ttl 0 asks every time.
+func (pxy *BaseProxy) newFirewallFilter(what string, ttl time.Duration) func(string) bool {
+	fw := pxy.GetResourceController().Firewall
+	if fw == nil {
+		return nil
+	}
+	xl := xlog.FromContextSafe(pxy.Context())
+	name := pxy.GetName()
+	user := pxy.GetUserInfo().User
+
+	check := func(remoteAddr string) bool {
+		ok, reason := fw.Allow(remoteAddr, name, user)
+		if !ok {
+			xl.Warnf("%s [%s] to proxy [%s] rejected by firewall: %s", what, remoteAddr, name, reason)
+		}
+		return ok
+	}
+	if ttl <= 0 {
+		return check
+	}
+
+	type verdict struct {
+		ok  bool
+		exp time.Time
+	}
+	var mu sync.Mutex
+	cache := make(map[string]verdict)
+
+	return func(remoteAddr string) bool {
+		now := time.Now()
+		mu.Lock()
+		if v, hit := cache[remoteAddr]; hit && v.exp.After(now) {
+			mu.Unlock()
+			return v.ok
+		}
+		mu.Unlock()
+
+		ok := check(remoteAddr)
+
+		mu.Lock()
+		if len(cache) >= udpFirewallVerdictMax {
+			clear(cache)
+		}
+		cache[remoteAddr] = verdict{ok: ok, exp: now.Add(ttl)}
+		mu.Unlock()
+		return ok
 	}
 }
 

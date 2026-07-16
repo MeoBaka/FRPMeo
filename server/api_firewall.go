@@ -29,13 +29,14 @@ func (svr *Service) apiFirewallGet(w http.ResponseWriter, _ *http.Request) {
 	apiWriteJSON(w, http.StatusOK, svr.rc.Firewall.Snapshot())
 }
 
-// PUT /api/firewall - replace enabled/default/rules/provider.
+// PUT /api/firewall - replace enabled/controlPort/default/rules/provider.
 func (svr *Service) apiFirewallPut(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Enabled  bool                    `json:"enabled"`
-		Default  string                  `json:"default"`
-		Rules    []firewall.Rule         `json:"rules"`
-		Provider firewall.ProviderConfig `json:"provider"`
+		Enabled     bool                    `json:"enabled"`
+		ControlPort bool                    `json:"controlPort"`
+		Default     string                  `json:"default"`
+		Rules       []firewall.Rule         `json:"rules"`
+		Provider    firewall.ProviderConfig `json:"provider"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
@@ -52,7 +53,7 @@ func (svr *Service) apiFirewallPut(w http.ResponseWriter, r *http.Request) {
 			body.Rules[i].ID = fwRandID()
 		}
 	}
-	if err := svr.rc.Firewall.SetConfig(body.Enabled, body.Default, body.Rules, body.Provider); err != nil {
+	if err := svr.rc.Firewall.SetConfig(body.Enabled, body.ControlPort, body.Default, body.Rules, body.Provider); err != nil {
 		apiWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

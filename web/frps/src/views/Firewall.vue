@@ -15,6 +15,26 @@
       </div>
     </div>
 
+    <!-- Scope -->
+    <el-card class="section" shadow="never">
+      <div class="card-title">Scope</div>
+      <p class="hint">
+        Rules always apply to user traffic reaching your proxies (tcp, udp, http,
+        https, mc, pe, tcpmux, tcp+udp). stcp / xtcp and their udp variants are
+        visitor-authenticated and are not covered.
+      </p>
+      <div class="fg-inline" style="margin-top:12px">
+        <label>Also protect the frps control port</label>
+        <el-switch v-model="snap.controlPort" />
+        <span class="hint">
+          Applies rules to frpc clients connecting to bindPort, before login.
+          Only IP-scoped rules match here (a rule naming a proxy or user cannot).
+          Careful: with default policy "deny" this locks out every client that
+          has no explicit allow rule.
+        </span>
+      </div>
+    </el-card>
+
     <!-- Reputation provider -->
     <el-card class="section" shadow="never">
       <div class="card-title">Blacklist provider (for unknown IPs)</div>
@@ -31,7 +51,7 @@
       <div v-if="snap.provider.mode === 'frpcontrol'" class="field-grid">
         <div class="fg-wide">
           <label>FRPControl URL (base)</label>
-          <el-input v-model="snap.provider.frpControlURL" placeholder="https://163.61.182.135:7002" />
+          <el-input v-model="snap.provider.frpControlURL" placeholder="https://frpcontrol.example.com:7002" />
         </div>
         <div class="fg-wide">
           <label>API key</label>
@@ -146,7 +166,7 @@ interface Provider {
   url: string; method: string; body: string; headers: Record<string, string>; blockedPath: string
   cacheTTLSec: number; timeoutMs: number; failOpen: boolean; insecureTLS: boolean
 }
-interface Snap { enabled: boolean; default: string; rules: Rule[]; provider: Provider }
+interface Snap { enabled: boolean; controlPort: boolean; default: string; rules: Rule[]; provider: Provider }
 
 function defProvider(): Provider {
   return { mode: 'off', frpControlURL: '', frpControlAPIKey: '', url: '', method: 'GET', body: '', headers: {}, blockedPath: '', cacheTTLSec: 300, timeoutMs: 800, failOpen: false, insecureTLS: false }
@@ -154,7 +174,7 @@ function defProvider(): Provider {
 
 const loading = ref(false)
 const saving = ref(false)
-const snap = reactive<Snap>({ enabled: true, default: 'allow', rules: [], provider: defProvider() })
+const snap = reactive<Snap>({ enabled: true, controlPort: false, default: 'allow', rules: [], provider: defProvider() })
 
 const headersText = computed({
   get: () => Object.entries(snap.provider.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n'),
@@ -183,6 +203,7 @@ async function load() {
   try {
     const s = await http.get<Snap>('../api/firewall')
     snap.enabled = s.enabled
+    snap.controlPort = !!s.controlPort
     snap.default = s.default || 'allow'
     snap.rules = s.rules || []
     snap.provider = { ...defProvider(), ...(s.provider || {}) }
@@ -198,7 +219,7 @@ async function load() {
 async function save() {
   saving.value = true
   try {
-    await http.put('../api/firewall', { enabled: snap.enabled, default: snap.default, rules: snap.rules, provider: snap.provider })
+    await http.put('../api/firewall', { enabled: snap.enabled, controlPort: snap.controlPort, default: snap.default, rules: snap.rules, provider: snap.provider })
     ElMessage.success('Saved')
   } catch (e: any) {
     ElMessage.error('Save failed: ' + (e.message || e))
