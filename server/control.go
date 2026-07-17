@@ -149,6 +149,14 @@ type Control struct {
 
 	mu sync.RWMutex
 
+	// started and replaced guard the doneCh handover, which is not as simple as
+	// it looks: a control can be replaced before it is ever started, because
+	// RegisterControl is what waits for the old control and Start() only runs
+	// once RegisterControl has returned. See Replaced.
+	started  bool
+	replaced bool
+	doneOnce sync.Once
+
 	xl     *xlog.Logger
 	ctx    context.Context
 	doneCh chan struct{}
@@ -176,7 +184,19 @@ func NewControl(ctx context.Context, sessionCtx *SessionContext) (*Control, erro
 }
 
 // Start starts the control session workers after login succeeds.
+//
+// A control handed over while login was still in flight is already finished:
+// bringing its worker up now would run a session that belongs to the client
+// that replaced it, and close doneCh a second time on the way out.
 func (ctl *Control) Start() {
+	ctl.mu.Lock()
+	if ctl.replaced {
+		ctl.mu.Unlock()
+		return
+	}
+	ctl.started = true
+	ctl.mu.Unlock()
+
 	go func() {
 		for i := 0; i < ctl.poolCount; i++ {
 			// ignore error here, that means that this control is closed
@@ -186,16 +206,50 @@ func (ctl *Control) Start() {
 	go ctl.worker()
 }
 
+// closeDone releases everything waiting in WaitClosed. Both worker() and
+// Replaced() can be the one to get here.
+func (ctl *Control) closeDone() {
+	ctl.doneOnce.Do(func() { close(ctl.doneCh) })
+}
+
 func (ctl *Control) Close() error {
 	ctl.sessionCtx.Conn.Close()
 	return nil
 }
 
+// Replaced hands this client's run id over to newCtl and retires this control.
+//
+// The caller is RegisterControl, which then waits here in WaitClosed - so
+// anything this does not release stays blocked for the life of the process,
+// along with the login it is holding up.
+//
+// Two things have to happen for it to let go, and neither is Close on its own:
+//
+// Closing the connection does not wake a read already blocked on it when
+// tcpMux is on, because the connection is a yamux stream and closing one
+// locally only half-closes it. On a peer that died without a FIN - a device
+// that lost power, a NAT that dropped the mapping, which is exactly the client
+// that reconnects and lands here - the dispatcher's read never returns, so
+// worker() never reaches its cleanup. An expired read deadline interrupts it.
+//
+// And a control replaced before Start() has no worker to reach that cleanup at
+// all, so doneCh has to be closed here instead.
 func (ctl *Control) Replaced(newCtl *Control) {
 	xl := ctl.xl
 	xl.Infof("replaced by client [%s]", newCtl.runID)
+
+	ctl.mu.Lock()
 	ctl.runID = ""
+	ctl.replaced = true
+	started := ctl.started
+	ctl.mu.Unlock()
+
+	_ = ctl.sessionCtx.Conn.SetReadDeadline(time.Now().Add(-time.Second))
 	ctl.sessionCtx.Conn.Close()
+
+	if !started {
+		ctl.closeDone()
+	}
 }
 
 func (ctl *Control) RegisterWorkConn(conn *proxy.WorkConn) error {
@@ -334,7 +388,7 @@ func (ctl *Control) worker() {
 	metrics.Server.CloseClient()
 	ctl.sessionCtx.ClientRegistry.MarkOfflineByRunID(ctl.runID)
 	xl.Infof("client exit success")
-	close(ctl.doneCh)
+	ctl.closeDone()
 }
 
 func (ctl *Control) registerMsgHandlers() {

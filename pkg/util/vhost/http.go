@@ -29,7 +29,7 @@ import (
 	libio "github.com/fatedier/golib/io"
 	"github.com/fatedier/golib/pool"
 	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
+	"golang.org/x/net/http2/h2c" //nolint:staticcheck // SA1019: see NewHTTPReverseProxy
 
 	httppkg "github.com/fatedier/frp/pkg/util/http"
 	"github.com/fatedier/frp/pkg/util/log"
@@ -139,7 +139,12 @@ func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *
 			_, _ = rw.Write(getNotFoundPageContent())
 		},
 	}
-	rp.proxy = h2c.NewHandler(proxy, &http2.Server{})
+	// h2c is deprecated in favor of setting Protocols on the http.Server, but
+	// that only accepts prior-knowledge h2c, while this also serves the
+	// HTTP/1.1 Upgrade handshake. Dropping it would change what frps accepts
+	// from anything tunneling cleartext HTTP/2 - not something to carry in on
+	// the back of a dependency bump.
+	rp.proxy = h2c.NewHandler(proxy, &http2.Server{}) //nolint:staticcheck // SA1019: deliberate, see above
 	return rp
 }
 
