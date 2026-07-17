@@ -15,8 +15,15 @@
 package firewall
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func newTestFirewall(t *testing.T, rules []Rule) *Firewall {
@@ -218,4 +225,119 @@ func TestAllowIPv6AndCIDR(t *testing.T) {
 	if ok, _ := f.Allow("[2001:db9::1]:5555", 6000); !ok {
 		t.Error("ipv6 outside the net should pass")
 	}
+}
+
+// --- provider self-reference / stampede ---
+
+// Reproduces the reported loop: the provider URL is served through a proxy on
+// frps itself, so asking the provider dials one of our own ports, which frps
+// sees as a new user connection to ask the provider about. Each question needs
+// an answer that needs the question asked again.
+func TestAllowSkipsProviderForItsOwnCall(t *testing.T) {
+	var queries atomic.Int64
+	// Stands in for the panel published through frps: answering means frps has
+	// dialed its own port, so Allow runs again for that connection.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries.Add(1)
+		_, _ = w.Write([]byte(`{"results":[{"blacklisted":false}]}`))
+	}))
+	defer srv.Close()
+
+	port := mustPort(t, srv.URL)
+	f := newTestFirewall(t, nil)
+	if err := f.SetConfig(true, false, "allow", nil, ProviderConfig{
+		Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k",
+		TimeoutMs: 500, CacheTTLSec: 60,
+	}); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+
+	if f.selfProviderPort != port {
+		t.Fatalf("provider on 127.0.0.1:%d should be recognized as this host, got selfProviderPort %d", port, f.selfProviderPort)
+	}
+
+	// frps calling its own provider port: must not ask the provider about it.
+	if ok, reason := f.Allow("127.0.0.1:50315", port); !ok {
+		t.Fatalf("our own provider call must pass, got blocked by %s", reason)
+	}
+	if got := queries.Load(); got != 0 {
+		t.Fatalf("our own provider call must not trigger a query, got %d", got)
+	}
+
+	// Same source, a different port: an ordinary connection, still checked.
+	if ok, _ := f.Allow("127.0.0.1:50316", port+1); !ok {
+		t.Fatal("unrelated connection should be allowed by the provider")
+	}
+	if got := queries.Load(); got != 1 {
+		t.Fatalf("connections on other ports are still checked, want 1 query got %d", got)
+	}
+}
+
+// A provider elsewhere must not be mistaken for us, or every port sharing its
+// number would quietly lose the reputation check.
+func TestSelfProviderNotSetForRemoteHost(t *testing.T) {
+	f := newTestFirewall(t, nil)
+	if err := f.SetConfig(true, false, "allow", nil, ProviderConfig{
+		Mode: "frpcontrol", FRPControlURL: "https://example.invalid:7002", FRPControlAPIKey: "k",
+	}); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+	if f.selfProviderPort != 0 {
+		t.Fatalf("a remote provider is not this host, got selfProviderPort %d", f.selfProviderPort)
+	}
+}
+
+// A burst from one unknown IP used to miss the cache in every goroutine and
+// fire one request each.
+func TestCheckExternalCollapsesConcurrentQueries(t *testing.T) {
+	var queries atomic.Int64
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries.Add(1)
+		<-release // hold every request open so they overlap
+		_, _ = w.Write([]byte(`{"results":[{"blacklisted":true}]}`))
+	}))
+	defer srv.Close()
+
+	f := newTestFirewall(t, nil)
+	if err := f.SetConfig(true, false, "allow", nil, ProviderConfig{
+		Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k",
+		TimeoutMs: 5000, CacheTTLSec: 60,
+	}); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+
+	const n = 50
+	var wg sync.WaitGroup
+	blocked := make([]bool, n)
+	for i := range n {
+		wg.Go(func() {
+			blocked[i] = f.checkExternal("8.8.8.8", f.provider.effective(), f.client)
+		})
+	}
+	time.Sleep(200 * time.Millisecond) // let them all pile onto the same IP
+	close(release)
+	wg.Wait()
+
+	if got := queries.Load(); got != 1 {
+		t.Fatalf("%d concurrent lookups of one IP should be a single query, got %d", n, got)
+	}
+	for i, b := range blocked {
+		if !b {
+			t.Fatalf("waiter %d missed the answer the query produced", i)
+		}
+	}
+}
+
+func mustPort(t *testing.T, rawURL string) int {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse %q: %v", rawURL, err)
+	}
+	p, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("port of %q: %v", rawURL, err)
+	}
+	return p
 }

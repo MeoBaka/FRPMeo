@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/fatedier/frp/pkg/util/log"
+	netpkg "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/xlog"
 )
@@ -31,6 +33,11 @@ type Manager struct {
 	pingPlugins        []Plugin
 	newWorkConnPlugins []Plugin
 	newUserConnPlugins []Plugin
+
+	// localIPs and selfPorts recognize frps calling a plugin that is published
+	// through frps itself. See IsSelfCall.
+	localIPs  map[string]bool
+	selfPorts map[int]bool
 }
 
 func NewManager() *Manager {
@@ -41,7 +48,31 @@ func NewManager() *Manager {
 		pingPlugins:        make([]Plugin, 0),
 		newWorkConnPlugins: make([]Plugin, 0),
 		newUserConnPlugins: make([]Plugin, 0),
+		localIPs:           netpkg.LocalAddrSet(),
+		selfPorts:          make(map[int]bool),
 	}
+}
+
+// IsSelfCall reports whether a user connection is frps calling a plugin that
+// lives behind one of its own proxies.
+//
+// The NewUserConn hook fires for every user connection, so a plugin published
+// through frps answers its own hook: the request is a user connection, which
+// fires the hook, which makes the request. There is no cache in the way and
+// nothing to converge on - one connection becomes thousands. Callers skip the
+// hook for these, which is also the honest answer: frps reaching its own plugin
+// is not user traffic for that plugin to rule on.
+//
+// A remote peer cannot pose as one: finishing a TCP handshake from a forged
+// local address means already sitting on the path.
+func (m *Manager) IsSelfCall(remoteAddr string, port int) bool {
+	return m.selfPorts[port] && netpkg.IsLocalAddr(remoteAddr, m.localIPs)
+}
+
+// HasNewUserConnPlugins reports whether any plugin wants the NewUserConn hook,
+// so callers can skip building a request no one will read.
+func (m *Manager) HasNewUserConnPlugins() bool {
+	return len(m.newUserConnPlugins) > 0
 }
 
 func newPluginRequestContext() (context.Context, *xlog.Logger) {
@@ -106,6 +137,16 @@ func handleMutableContent[T any](
 }
 
 func (m *Manager) Register(p Plugin) {
+	// Note plugins that live behind one of our own proxies, so their hook is
+	// not run on our own calls to them.
+	if hp, ok := p.(*httpPlugin); ok {
+		if port := netpkg.PortIfLocal(hp.url, m.localIPs); port != 0 {
+			m.selfPorts[port] = true
+			log.Warnf("plugin [%s] at %q resolves to this host on port %d; hooks are skipped for "+
+				"connections from this host to that port, otherwise calling the plugin would call it again",
+				p.Name(), hp.url, port)
+		}
+	}
 	if p.IsSupport(OpLogin) {
 		m.loginPlugins = append(m.loginPlugins, p)
 	}

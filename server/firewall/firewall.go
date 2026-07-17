@@ -41,6 +41,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fatedier/frp/pkg/util/log"
+	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
 
 // Rule is a manual, ordered allow/deny rule. An empty CIDR or Port matches any.
@@ -143,18 +146,31 @@ type Firewall struct {
 	provider    ProviderConfig
 	client      *http.Client
 
-	repMu    sync.Mutex
-	repCache map[string]repEntry
+	// selfProviderPort is set when the provider URL points back at this frps,
+	// e.g. the panel is only reachable through a tunnel frps itself serves.
+	// Asking the provider then means dialing our own public port, which is a
+	// new user connection, which asks the provider again - so the provider
+	// step is skipped for our own calls. 0 when the provider is elsewhere.
+	// See resolveSelfProvider.
+	selfProviderPort int
+	// localIPs are this host's own addresses, resolved when the config is set
+	// rather than per connection.
+	localIPs map[string]bool
+
+	repMu       sync.Mutex
+	repCache    map[string]repEntry
+	repInFlight map[string]chan struct{}
 }
 
 // New loads firewall state from path and starts a background expiry sweeper.
 func New(path string) (*Firewall, error) {
 	f := &Firewall{
-		path:     path,
-		nowFn:    func() int64 { return time.Now().Unix() },
-		enabled:  true,
-		def:      "allow",
-		repCache: make(map[string]repEntry),
+		path:        path,
+		nowFn:       func() int64 { return time.Now().Unix() },
+		enabled:     true,
+		def:         "allow",
+		repCache:    make(map[string]repEntry),
+		repInFlight: make(map[string]chan struct{}),
 	}
 	b, err := os.ReadFile(path)
 	switch {
@@ -237,10 +253,12 @@ func (f *Firewall) Allow(remoteAddr string, port int) (bool, string) {
 	provider := f.provider
 	client := f.client
 	def := f.def
+	selfCall := ip != nil && f.isSelfCall(ip, port)
 	f.mu.RUnlock()
 
-	// 2) external reputation provider for unknown IPs
-	if (provider.Mode == "frpcontrol" || provider.Mode == "custom") && ip != nil {
+	// 2) external reputation provider for unknown IPs. Our own call out to the
+	// provider is exempt: it is the query, not something to run a query on.
+	if (provider.Mode == "frpcontrol" || provider.Mode == "custom") && ip != nil && !selfCall {
 		if f.checkExternal(ip.String(), provider.effective(), client) {
 			return false, "reputation"
 		}
@@ -251,28 +269,46 @@ func (f *Firewall) Allow(remoteAddr string, port int) (bool, string) {
 
 // checkExternal returns whether ip is blocked according to the provider,
 // caching per ip. On error it honors FailOpen (fail-closed = blocked).
+//
+// Lookups for the same IP are collapsed into one query: the cache is only
+// written once an answer comes back, so without this a burst of connections
+// from one unknown IP would all miss and each fire its own request - turning
+// one visitor into a stampede against the provider.
 func (f *Firewall) checkExternal(ipStr string, p ProviderConfig, client *http.Client) bool {
-	now := f.nowFn()
-	f.repMu.Lock()
-	if e, ok := f.repCache[ipStr]; ok && e.exp > now {
+	for {
+		now := f.nowFn()
+		f.repMu.Lock()
+		if e, ok := f.repCache[ipStr]; ok && e.exp > now {
+			f.repMu.Unlock()
+			return e.blocked
+		}
+		if ch, ok := f.repInFlight[ipStr]; ok {
+			// Someone is already asking about this IP. Wait for their answer
+			// instead of asking again, then re-read the cache.
+			f.repMu.Unlock()
+			<-ch
+			continue
+		}
+		ch := make(chan struct{})
+		f.repInFlight[ipStr] = ch
 		f.repMu.Unlock()
-		return e.blocked
-	}
-	f.repMu.Unlock()
 
-	blocked, err := queryProvider(ipStr, p, client)
-	ttl := int64(p.CacheTTLSec)
-	if ttl <= 0 {
-		ttl = 300
+		blocked, err := queryProvider(ipStr, p, client)
+		ttl := int64(p.CacheTTLSec)
+		if ttl <= 0 {
+			ttl = 300
+		}
+		if err != nil {
+			blocked = !p.FailOpen // fail-closed by default
+			ttl = 10              // don't hammer a failing provider
+		}
+		f.repMu.Lock()
+		f.repCache[ipStr] = repEntry{blocked: blocked, exp: now + ttl}
+		delete(f.repInFlight, ipStr)
+		f.repMu.Unlock()
+		close(ch) // wakes the waiters, which now find the cache filled
+		return blocked
 	}
-	if err != nil {
-		blocked = !p.FailOpen // fail-closed by default
-		ttl = 10              // don't hammer a failing provider
-	}
-	f.repMu.Lock()
-	f.repCache[ipStr] = repEntry{blocked: blocked, exp: now + ttl}
-	f.repMu.Unlock()
-	return blocked
 }
 
 func queryProvider(ipStr string, p ProviderConfig, client *http.Client) (bool, error) {
@@ -402,6 +438,44 @@ func (f *Firewall) buildClientLocked() {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 - opt-in for self-signed providers
 	}
 	f.client = &http.Client{Transport: tr}
+	f.resolveSelfProviderLocked()
+}
+
+// resolveSelfProviderLocked works out whether the provider URL resolves back to
+// this machine, and on which port.
+//
+// This is the shape that bites: the panel is published through a proxy on frps,
+// so its URL is one of frps's own public ports. Every provider query then dials
+// that port, which frps sees as a new user connection, which asks the provider
+// again - each answer needing another answer first. Recorded here so Allow can
+// leave our own calls alone.
+//
+// DNS and interface lookups happen here, on config change, never per connection.
+func (f *Firewall) resolveSelfProviderLocked() {
+	f.selfProviderPort = 0
+	f.localIPs = netpkg.LocalAddrSet()
+
+	p := f.provider.effective()
+	if p.Mode == "off" || p.URL == "" {
+		return
+	}
+	port := netpkg.PortIfLocal(strings.ReplaceAll(p.URL, "{ip}", "0.0.0.0"), f.localIPs)
+	if port == 0 {
+		return
+	}
+	f.selfProviderPort = port
+	log.Warnf("firewall: provider URL %q resolves to this host on port %d; "+
+		"connections from this host to that port skip the reputation check, "+
+		"otherwise each check would trigger another one", p.URL, port)
+}
+
+// isSelfCall reports whether a connection is this frps dialing its own provider
+// URL: from one of our addresses, to the port the provider lives on. A remote
+// attacker cannot forge this - completing a TCP handshake from a spoofed local
+// address needs to be on the path already, at which point the host is lost
+// anyway.
+func (f *Firewall) isSelfCall(ip net.IP, port int) bool {
+	return f.selfProviderPort != 0 && port == f.selfProviderPort && f.localIPs[ip.String()]
 }
 
 func (f *Firewall) pruneLocked() bool {

@@ -278,52 +278,88 @@ func (pxy *BaseProxy) startCommonTCPListenersHandler() {
 }
 
 const (
-	// How long a per-source firewall verdict is reused on the UDP path. UDP is
-	// packet-based, so consulting the firewall for every packet would put a
-	// lock (and possibly a reputation lookup) in the hot path. The cost is that
-	// a rule change takes up to this long to affect an in-flight UDP source.
-	udpFirewallVerdictTTL = 2 * time.Second
-	// Cap on remembered UDP sources: the source address of a UDP packet is
-	// trivially spoofed, so the cache must not grow without bound.
-	udpFirewallVerdictMax = 4096
+	// How long an admission verdict is reused for one source. Without it, a udp
+	// proxy would run the whole check per packet and an http proxy per request,
+	// each possibly including a plugin round trip. The cost is that a rule
+	// change takes up to this long to reach traffic already flowing.
+	admitVerdictTTL = 2 * time.Second
+	// Cap on remembered sources: a udp source address is trivially spoofed, so
+	// the cache must not grow without bound.
+	admitVerdictMax = 4096
 )
 
-// newUDPFirewallFilter returns a per-source firewall predicate for the UDP
+// newUDPAdmitFilter returns a per-source admission predicate for the UDP
 // proxies (udp, pe, and the UDP half of tcp+udp), which have their own read
-// loop and never reach handleUserTCPConnection. Verdicts are cached because
-// this runs per packet. port is the frps-side port they listen on. It returns
-// nil when no firewall is configured, so the caller pays nothing.
-func (pxy *BaseProxy) newUDPFirewallFilter(port int) func(string) bool {
-	return pxy.newFirewallFilter("udp packets from", port, udpFirewallVerdictTTL)
+// loop and never reach handleUserTCPConnection. port is the frps-side port they
+// listen on. Verdicts are always cached: this runs per packet.
+func (pxy *BaseProxy) newUDPAdmitFilter(port int) func(string) bool {
+	return pxy.newAdmitFilter("udp packets from", port, admitVerdictTTL)
 }
 
-// newHTTPFirewallFilter returns a per-request firewall predicate for http
-// proxies, which are served by the vhost reverse proxy and never reach
-// handleUserTCPConnection either. The reverse proxy pools work connections, so
-// this has to be per request rather than per connection. port is the shared
-// vhost http port, which is what a rule can name - every http proxy answers on
-// it, so a port rule here covers all of them rather than one.
-func (pxy *BaseProxy) newHTTPFirewallFilter(port int) vhost.AllowFunc {
-	return pxy.newFirewallFilter("user conn", port, 0)
+// newHTTPAdmitFilter returns a per-request admission predicate for http
+// proxies, which the vhost reverse proxy serves without ever reaching
+// handleUserTCPConnection. It has to run per request rather than per
+// connection: the reverse proxy pools work connections by route, not by
+// visitor, so a check at connection setup would wave through everyone who
+// landed on an already-open one.
+//
+// port is the shared vhost http port. Every http proxy answers on it, so a rule
+// or plugin naming that port covers all of them rather than one.
+func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
+	// With no plugin the check is a local lookup - cheap enough to repeat per
+	// request, which keeps rule changes immediate. A plugin turns each request
+	// into an http round trip, which a busy site would not survive, so verdicts
+	// get cached instead.
+	ttl := time.Duration(0)
+	if pm := pxy.GetResourceController().PluginManager; pm != nil && pm.HasNewUserConnPlugins() {
+		ttl = admitVerdictTTL
+	}
+	return pxy.newAdmitFilter("user conn", port, ttl)
 }
 
-// newFirewallFilter builds a firewall predicate keyed by source address. A
-// non-zero ttl caches verdicts for that long, trading rule-change latency for
-// not consulting the firewall on every packet; ttl 0 asks every time.
-func (pxy *BaseProxy) newFirewallFilter(what string, port int, ttl time.Duration) func(string) bool {
-	fw := pxy.GetResourceController().Firewall
-	if fw == nil {
+// newAdmitFilter builds the admission predicate for the paths that bypass
+// handleUserTCPConnection: the firewall first, then the NewUserConn plugin
+// hook. Returns nil when neither is configured, so those paths pay nothing.
+//
+// A non-zero ttl caches the verdict per source address. That is sound rather
+// than a shortcut: both stages only ever see the source, the proxy and its
+// owner, so asking twice about the same source cannot produce a different
+// answer. The cost is that a rule change takes up to ttl to reach traffic
+// already flowing.
+func (pxy *BaseProxy) newAdmitFilter(what string, port int, ttl time.Duration) func(string) bool {
+	rc := pxy.GetResourceController()
+	fw := rc.Firewall
+	pm := rc.PluginManager
+	hookPlugins := pm != nil && pm.HasNewUserConnPlugins()
+	if fw == nil && !hookPlugins {
 		return nil
 	}
 	xl := xlog.FromContextSafe(pxy.Context())
 	name := pxy.GetName()
+	proxyType := pxy.configurer.GetBaseConfig().Type
 
 	check := func(remoteAddr string) bool {
-		ok, reason := fw.Allow(remoteAddr, port)
-		if !ok {
-			xl.Warnf("%s [%s] to proxy [%s] rejected by firewall: %s", what, remoteAddr, name, reason)
+		if fw != nil {
+			if ok, reason := fw.Allow(remoteAddr, port); !ok {
+				xl.Warnf("%s [%s] to proxy [%s] rejected by firewall: %s", what, remoteAddr, name, reason)
+				return false
+			}
 		}
-		return ok
+		// Skipped for frps reaching a plugin published through one of our own
+		// proxies, which would otherwise have the hook call itself.
+		if hookPlugins && !pm.IsSelfCall(remoteAddr, port) {
+			_, err := pm.NewUserConn(&plugin.NewUserConnContent{
+				User:       pxy.GetUserInfo(),
+				ProxyName:  name,
+				ProxyType:  proxyType,
+				RemoteAddr: remoteAddr,
+			})
+			if err != nil {
+				xl.Warnf("%s [%s] to proxy [%s] was rejected, err:%v", what, remoteAddr, name, err)
+				return false
+			}
+		}
+		return true
 	}
 	if ttl <= 0 {
 		return check
@@ -348,7 +384,7 @@ func (pxy *BaseProxy) newFirewallFilter(what string, port int, ttl time.Duration
 		ok := check(remoteAddr)
 
 		mu.Lock()
-		if len(cache) >= udpFirewallVerdictMax {
+		if len(cache) >= admitVerdictMax {
 			clear(cache)
 		}
 		cache[remoteAddr] = verdict{ok: ok, exp: now.Add(ttl)}
@@ -371,18 +407,25 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 		ProxyType:  cfg.Type,
 		RemoteAddr: userConn.RemoteAddr().String(),
 	}
+	// The frps-side port the user dialed: what a firewall rule matches on, and
+	// what tells us a connection is frps reaching its own machinery.
+	dstPort := addrPort(userConn.LocalAddr())
+
 	// Native firewall: reject the user connection before it reaches the tunnel.
-	// The port a rule matches is the frps-side port the user dialed.
 	if fw := rc.Firewall; fw != nil {
-		if ok, reason := fw.Allow(content.RemoteAddr, addrPort(userConn.LocalAddr())); !ok {
+		if ok, reason := fw.Allow(content.RemoteAddr, dstPort); !ok {
 			xl.Warnf("user conn [%s] to proxy [%s] rejected by firewall: %s", content.RemoteAddr, content.ProxyName, reason)
 			return
 		}
 	}
-	_, err := rc.PluginManager.NewUserConn(content)
-	if err != nil {
-		xl.Warnf("the user conn [%s] was rejected, err:%v", content.RemoteAddr, err)
-		return
+	// Server plugin hook, unless this is frps dialing a plugin published
+	// through one of our own proxies - the hook call is itself a user
+	// connection, so running the hook on it would call the plugin again.
+	if !rc.PluginManager.IsSelfCall(content.RemoteAddr, dstPort) {
+		if _, err := rc.PluginManager.NewUserConn(content); err != nil {
+			xl.Warnf("the user conn [%s] was rejected, err:%v", content.RemoteAddr, err)
+			return
+		}
 	}
 
 	// try all connections from the pool

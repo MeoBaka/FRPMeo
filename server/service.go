@@ -449,7 +449,11 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 
 	acceptedConn, err := svr.acceptConnection(ctx, conn)
 	if err != nil {
-		log.Tracef("failed to accept frp connection: %v", err)
+		// Anything that reaches the bind port but is not a frp client lands
+		// here: port scanners, health checks, a misconfigured frpc. Worth a
+		// warning with the address, so it can be answered with a firewall rule
+		// - that is the only thing that makes the line actionable.
+		log.Warnf("client conn [%s] was not a valid frp connection: %v", conn.RemoteAddr(), err)
 		conn.Close()
 		return
 	}
@@ -480,14 +484,14 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 		}
 
 		if err != nil {
-			xl.Warnf("register control error: %v", err)
+			xl.Warnf("client conn [%s] register control error: %v", conn.RemoteAddr(), err)
 			if writeErr := writeWithDeadline(conn, connWriteTimeout, func() error {
 				return acceptedConn.conn.WriteMsg(&msg.LoginResp{
 					Version: version.Full(),
 					Error:   util.GenerateResponseErrorString("register control error", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
 				})
 			}); writeErr != nil {
-				xl.Warnf("write login error response error: %v", writeErr)
+				xl.Warnf("client conn [%s] write login error response error: %v", conn.RemoteAddr(), writeErr)
 			}
 			conn.Close()
 			return
@@ -499,7 +503,7 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 				Error:   "",
 			})
 		}); err != nil {
-			xl.Warnf("write login response error: %v", err)
+			xl.Warnf("client conn [%s] write login response error: %v", conn.RemoteAddr(), err)
 			svr.ctlManager.Del(m.RunID, ctl)
 			svr.clientRegistry.MarkOfflineByRunID(m.RunID)
 			conn.Close()
@@ -521,7 +525,7 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 		}
 	case *msg.NewVisitorConn:
 		if err = svr.RegisterVisitorConn(conn, m, acceptedConn.wireProtocol); err != nil {
-			xl.Warnf("register visitor conn error: %v", err)
+			xl.Warnf("client conn [%s] register visitor conn error: %v", conn.RemoteAddr(), err)
 			_ = acceptedConn.conn.WriteMsg(&msg.NewVisitorConnResp{
 				ProxyName: m.ProxyName,
 				Error:     util.GenerateResponseErrorString("register visitor conn error", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
@@ -720,7 +724,7 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 			var isTLS, custom bool
 			c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, connReadTimeout)
 			if err != nil {
-				log.Warnf("checkAndEnableTLSServerConnWithTimeout error: %v", err)
+				log.Warnf("client conn [%s] failed the TLS check: %v", originConn.RemoteAddr(), err)
 				originConn.Close()
 				continue
 			}
@@ -861,7 +865,7 @@ func (svr *Service) RegisterWorkConn(workConn *msg.Conn, newMsg *msg.NewWorkConn
 	xl := netpkg.NewLogFromConn(workConn)
 	ctl, exist := svr.ctlManager.GetByID(newMsg.RunID)
 	if !exist {
-		xl.Warnf("no client control found for run id [%s]", newMsg.RunID)
+		xl.Warnf("client conn [%s] sent a work conn for unknown run id [%s]", workConn.RemoteAddr(), newMsg.RunID)
 		return fmt.Errorf("no client control found for run id [%s]", newMsg.RunID)
 	}
 
@@ -881,7 +885,7 @@ func (svr *Service) RegisterWorkConn(workConn *msg.Conn, newMsg *msg.NewWorkConn
 		err = ctl.sessionCtx.AuthVerifier.VerifyNewWorkConn(newMsg)
 	}
 	if err != nil {
-		xl.Warnf("invalid NewWorkConn with run id [%s]", newMsg.RunID)
+		xl.Warnf("client conn [%s] sent an invalid work conn for run id [%s]", workConn.RemoteAddr(), newMsg.RunID)
 		return err
 	}
 	return ctl.RegisterWorkConn(proxy.NewWorkConn(workConn))
