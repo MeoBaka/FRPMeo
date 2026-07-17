@@ -75,11 +75,128 @@ type V2ClientStatusResp struct {
 
 type V2ProxyResp struct {
 	Name     string            `json:"name"`
-	Type     string            `json:"type"`
 	User     string            `json:"user"`
 	ClientID string            `json:"clientID"`
-	Spec     any               `json:"spec"`
+	Spec     V2ProxySpec       `json:"spec"`
 	Status   V2ProxyStatusResp `json:"status"`
+}
+
+type V2ProxySpec struct {
+	Type string `json:"type"`
+
+	TCP    *V2TCPProxySpec    `json:"tcp,omitempty"`
+	UDP    *V2UDPProxySpec    `json:"udp,omitempty"`
+	HTTP   *V2HTTPProxySpec   `json:"http,omitempty"`
+	HTTPS  *V2HTTPSProxySpec  `json:"https,omitempty"`
+	TCPMux *V2TCPMuxProxySpec `json:"tcpmux,omitempty"`
+	STCP   *V2STCPProxySpec   `json:"stcp,omitempty"`
+	SUDP   *V2SUDPProxySpec   `json:"sudp,omitempty"`
+	XTCP   *V2XTCPProxySpec   `json:"xtcp,omitempty"`
+
+	// Fork-only proxy types.
+	XUDP     *V2XUDPProxySpec     `json:"xudp,omitempty"`
+	TCPUDP   *V2TCPUDPProxySpec   `json:"tcp+udp,omitempty"`
+	STCPSUDP *V2STCPSUDPProxySpec `json:"stcp+sudp,omitempty"`
+	XTCPXUDP *V2XTCPXUDPProxySpec `json:"xtcp+xudp,omitempty"`
+	MC       *V2MCProxySpec       `json:"mc,omitempty"`
+	PE       *V2PEProxySpec       `json:"pe,omitempty"`
+}
+
+type V2ProxyBaseSpec struct {
+	Annotations  map[string]string        `json:"annotations,omitempty"`
+	Metadatas    map[string]string        `json:"metadatas,omitempty"`
+	Transport    *V2ProxyTransportSpec    `json:"transport,omitempty"`
+	LoadBalancer *V2ProxyLoadBalancerSpec `json:"loadBalancer,omitempty"`
+}
+
+type V2ProxyTransportSpec struct {
+	UseEncryption      bool   `json:"useEncryption"`
+	UseCompression     bool   `json:"useCompression"`
+	BandwidthLimit     string `json:"bandwidthLimit"`
+	BandwidthLimitMode string `json:"bandwidthLimitMode"`
+}
+
+type V2ProxyLoadBalancerSpec struct {
+	Group string `json:"group"`
+}
+
+type V2TCPProxySpec struct {
+	V2ProxyBaseSpec
+	RemotePort *int `json:"remotePort,omitempty"`
+}
+
+type V2UDPProxySpec struct {
+	V2ProxyBaseSpec
+	RemotePort *int `json:"remotePort,omitempty"`
+}
+
+type V2HTTPProxySpec struct {
+	V2ProxyBaseSpec
+	CustomDomains     []string `json:"customDomains,omitempty"`
+	Subdomain         string   `json:"subdomain,omitempty"`
+	Locations         []string `json:"locations,omitempty"`
+	HostHeaderRewrite string   `json:"hostHeaderRewrite,omitempty"`
+}
+
+type V2HTTPSProxySpec struct {
+	V2ProxyBaseSpec
+	CustomDomains []string `json:"customDomains,omitempty"`
+	Subdomain     string   `json:"subdomain,omitempty"`
+}
+
+type V2TCPMuxProxySpec struct {
+	V2ProxyBaseSpec
+	CustomDomains   []string `json:"customDomains,omitempty"`
+	Subdomain       string   `json:"subdomain,omitempty"`
+	Multiplexer     string   `json:"multiplexer,omitempty"`
+	RouteByHTTPUser string   `json:"routeByHTTPUser,omitempty"`
+}
+
+type V2STCPProxySpec struct {
+	V2ProxyBaseSpec
+}
+
+type V2SUDPProxySpec struct {
+	V2ProxyBaseSpec
+}
+
+type V2XTCPProxySpec struct {
+	V2ProxyBaseSpec
+}
+
+// Fork-only proxy types. As with stcp/sudp/xtcp above, the secret key is never
+// exposed here - it is a credential, not status.
+
+type V2XUDPProxySpec struct {
+	V2ProxyBaseSpec
+}
+
+type V2TCPUDPProxySpec struct {
+	V2ProxyBaseSpec
+	RemotePort *int `json:"remotePort,omitempty"`
+}
+
+type V2STCPSUDPProxySpec struct {
+	V2ProxyBaseSpec
+}
+
+type V2XTCPXUDPProxySpec struct {
+	V2ProxyBaseSpec
+}
+
+// V2MCProxySpec describes a Minecraft Java proxy. Several mc proxies may share
+// one RemotePort and be told apart by the handshake hostname, so the domains
+// are as much a part of the address as the port is.
+type V2MCProxySpec struct {
+	V2ProxyBaseSpec
+	RemotePort    *int     `json:"remotePort,omitempty"`
+	CustomDomains []string `json:"customDomains,omitempty"`
+	Subdomain     string   `json:"subdomain,omitempty"`
+}
+
+type V2PEProxySpec struct {
+	V2ProxyBaseSpec
+	RemotePort *int `json:"remotePort,omitempty"`
 }
 
 type V2ProxyStatusResp struct {

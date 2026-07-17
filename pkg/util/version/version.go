@@ -14,7 +14,7 @@
 
 package version
 
-var version = "1.3.21.0.69.1.20 [DEV]"
+var version = "1.6.35.0.70.0.0 [DEV]"
 
 func Full() string {
 	return version

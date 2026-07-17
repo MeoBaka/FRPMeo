@@ -19,6 +19,7 @@ import (
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
 	"github.com/fatedier/frp/pkg/util/tcpmux"
 	"github.com/fatedier/frp/pkg/util/vhost"
+	"github.com/fatedier/frp/server/firewall"
 	"github.com/fatedier/frp/server/group"
 	"github.com/fatedier/frp/server/ports"
 	"github.com/fatedier/frp/server/visitor"
@@ -65,6 +66,10 @@ type ResourceController struct {
 
 	// All server manager plugin
 	PluginManager *plugin.Manager
+
+	// Native firewall: access control for incoming user connections
+	// (IP/CIDR + proxy + user rules), managed from the dashboard.
+	Firewall *firewall.Firewall
 }
 
 func (rc *ResourceController) Close() error {

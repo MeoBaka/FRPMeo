@@ -15,6 +15,11 @@
       <ConfigField label="Local IP" type="text" v-model="form.localIP" placeholder="127.0.0.1" :readonly="readonly" />
       <ConfigField label="Local Port" type="number" v-model="form.localPort" :min="0" :max="65535" prop="localPort" :readonly="readonly" />
     </div>
+    <div v-if="['tcp+udp', 'stcp+sudp', 'xtcp+xudp'].includes(form.type)" class="field-row two-col">
+      <ConfigField label="Local Port (UDP)" type="number" v-model="form.localPortUDP" :min="0" :max="65535"
+        tip="UDP local port for the combined type; defaults to Local Port when empty" :readonly="readonly" />
+      <div></div>
+    </div>
   </template>
 
   <!-- Plugin mode -->

@@ -110,6 +110,12 @@ type CreateConnFunc func(remoteAddr string) (net.Conn, error)
 
 type CreateConnByEndpointFunc func(endpoint, remoteAddr string) (net.Conn, error)
 
+// AllowFunc reports whether a request from remoteAddr may be served. It is
+// consulted per request, not per connection: the reverse proxy pools work
+// connections, so a check at connection-creation time would let later requests
+// on an already-open connection through unchecked.
+type AllowFunc func(remoteAddr string) bool
+
 // RouteConfig is the params used to match HTTP requests
 type RouteConfig struct {
 	Domain          string
@@ -124,6 +130,7 @@ type RouteConfig struct {
 	CreateConnFn           CreateConnFunc
 	ChooseEndpointFn       ChooseEndpointFunc
 	CreateConnByEndpointFn CreateConnByEndpointFunc
+	AllowFn                AllowFunc
 }
 
 // listen for a new domain name, if rewriteHost is not empty and rewriteHost func is not nil,

@@ -62,6 +62,9 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 		Username:        pxy.cfg.HTTPUser,
 		Password:        pxy.cfg.HTTPPassword,
 		CreateConnFn:    pxy.GetRealConn,
+		// http proxies are served by the vhost reverse proxy and never reach
+		// handleUserTCPConnection, so the firewall is applied per request here.
+		AllowFn: pxy.newHTTPAdmitFilter(pxy.serverCfg.VhostHTTPPort),
 	}
 
 	locations := pxy.cfg.Locations

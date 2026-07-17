@@ -23,6 +23,8 @@ type ProxyDefinition struct {
 	TCPUDP   *v1.TCPUDPProxyConfig   `json:"tcp+udp,omitempty"`
 	STCPSUDP *v1.STCPSUDPProxyConfig `json:"stcp+sudp,omitempty"`
 	XTCPXUDP *v1.XTCPXUDPProxyConfig `json:"xtcp+xudp,omitempty"`
+	MC       *v1.MCProxyConfig       `json:"mc,omitempty"`
+	PE       *v1.PEProxyConfig       `json:"pe,omitempty"`
 }
 
 func (p *ProxyDefinition) Validate(pathName string, isUpdate bool) error {
@@ -94,6 +96,10 @@ func ProxyDefinitionFromConfigurer(cfg v1.ProxyConfigurer) (ProxyDefinition, err
 		payload.STCPSUDP = c
 	case *v1.XTCPXUDPProxyConfig:
 		payload.XTCPXUDP = c
+	case *v1.MCProxyConfig:
+		payload.MC = c
+	case *v1.PEProxyConfig:
+		payload.PE = c
 	default:
 		return ProxyDefinition{}, fmt.Errorf("unsupported proxy configurer type %T", cfg)
 	}
@@ -166,13 +172,23 @@ func (p *ProxyDefinition) activeBlock() (v1.ProxyConfigurer, string, int) {
 		block = p.XTCPXUDP
 		blockType = "xtcp+xudp"
 	}
+	if p.MC != nil {
+		count++
+		block = p.MC
+		blockType = "mc"
+	}
+	if p.PE != nil {
+		count++
+		block = p.PE
+		blockType = "pe"
+	}
 
 	return block, blockType, count
 }
 
 func IsProxyType(typ string) bool {
 	switch typ {
-	case "tcp", "udp", "http", "https", "tcpmux", "stcp", "sudp", "xtcp", "xudp", "tcp+udp", "stcp+sudp", "xtcp+xudp":
+	case "tcp", "udp", "http", "https", "tcpmux", "stcp", "sudp", "xtcp", "xudp", "tcp+udp", "stcp+sudp", "xtcp+xudp", "mc", "pe":
 		return true
 	default:
 		return false

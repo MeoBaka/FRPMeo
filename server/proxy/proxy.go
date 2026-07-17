@@ -35,6 +35,7 @@ import (
 	"github.com/fatedier/frp/pkg/proto/wire"
 	"github.com/fatedier/frp/pkg/util/limit"
 	netpkg "github.com/fatedier/frp/pkg/util/net"
+	"github.com/fatedier/frp/pkg/util/vhost"
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server/controller"
 	"github.com/fatedier/frp/server/metrics"
@@ -95,6 +96,11 @@ type BaseProxy struct {
 	loginMsg      *msg.Login
 	configurer    v1.ProxyConfigurer
 	wireProtocol  string
+
+	// peers, when set, makes this proxy report distinct peer IPs rather than
+	// individual connections. Set by proxy types whose halves serve the same
+	// peer over two transports (tcp+udp).
+	peers *peerTracker
 
 	mu  sync.RWMutex
 	xl  *xlog.Logger
@@ -271,6 +277,122 @@ func (pxy *BaseProxy) startCommonTCPListenersHandler() {
 	}
 }
 
+const (
+	// How long an admission verdict is reused for one source. Without it, a udp
+	// proxy would run the whole check per packet and an http proxy per request,
+	// each possibly including a plugin round trip. The cost is that a rule
+	// change takes up to this long to reach traffic already flowing.
+	admitVerdictTTL = 2 * time.Second
+	// Cap on remembered sources: a udp source address is trivially spoofed, so
+	// the cache must not grow without bound.
+	admitVerdictMax = 4096
+)
+
+// newUDPAdmitFilter returns a per-source admission predicate for the UDP
+// proxies (udp, pe, and the UDP half of tcp+udp), which have their own read
+// loop and never reach handleUserTCPConnection. port is the frps-side port they
+// listen on. Verdicts are always cached: this runs per packet.
+func (pxy *BaseProxy) newUDPAdmitFilter(port int) func(string) bool {
+	return pxy.newAdmitFilter("udp packets from", port, admitVerdictTTL)
+}
+
+// newHTTPAdmitFilter returns a per-request admission predicate for http
+// proxies, which the vhost reverse proxy serves without ever reaching
+// handleUserTCPConnection. It has to run per request rather than per
+// connection: the reverse proxy pools work connections by route, not by
+// visitor, so a check at connection setup would wave through everyone who
+// landed on an already-open one.
+//
+// port is the shared vhost http port. Every http proxy answers on it, so a rule
+// or plugin naming that port covers all of them rather than one.
+func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
+	// With no plugin the check is a local lookup - cheap enough to repeat per
+	// request, which keeps rule changes immediate. A plugin turns each request
+	// into an http round trip, which a busy site would not survive, so verdicts
+	// get cached instead.
+	ttl := time.Duration(0)
+	if pm := pxy.GetResourceController().PluginManager; pm != nil && pm.HasNewUserConnPlugins() {
+		ttl = admitVerdictTTL
+	}
+	return pxy.newAdmitFilter("user conn", port, ttl)
+}
+
+// newAdmitFilter builds the admission predicate for the paths that bypass
+// handleUserTCPConnection: the firewall first, then the NewUserConn plugin
+// hook. Returns nil when neither is configured, so those paths pay nothing.
+//
+// A non-zero ttl caches the verdict per source address. That is sound rather
+// than a shortcut: both stages only ever see the source, the proxy and its
+// owner, so asking twice about the same source cannot produce a different
+// answer. The cost is that a rule change takes up to ttl to reach traffic
+// already flowing.
+func (pxy *BaseProxy) newAdmitFilter(what string, port int, ttl time.Duration) func(string) bool {
+	rc := pxy.GetResourceController()
+	fw := rc.Firewall
+	pm := rc.PluginManager
+	hookPlugins := pm != nil && pm.HasNewUserConnPlugins()
+	if fw == nil && !hookPlugins {
+		return nil
+	}
+	xl := xlog.FromContextSafe(pxy.Context())
+	name := pxy.GetName()
+	proxyType := pxy.configurer.GetBaseConfig().Type
+
+	check := func(remoteAddr string) bool {
+		if fw != nil {
+			if ok, reason := fw.Allow(remoteAddr, port); !ok {
+				xl.Warnf("%s [%s] to proxy [%s] rejected by firewall: %s", what, remoteAddr, name, reason)
+				return false
+			}
+		}
+		// Skipped for frps reaching a plugin published through one of our own
+		// proxies, which would otherwise have the hook call itself.
+		if hookPlugins && !pm.IsSelfCall(remoteAddr, port) {
+			_, err := pm.NewUserConn(&plugin.NewUserConnContent{
+				User:       pxy.GetUserInfo(),
+				ProxyName:  name,
+				ProxyType:  proxyType,
+				RemoteAddr: remoteAddr,
+			})
+			if err != nil {
+				xl.Warnf("%s [%s] to proxy [%s] was rejected, err:%v", what, remoteAddr, name, err)
+				return false
+			}
+		}
+		return true
+	}
+	if ttl <= 0 {
+		return check
+	}
+
+	type verdict struct {
+		ok  bool
+		exp time.Time
+	}
+	var mu sync.Mutex
+	cache := make(map[string]verdict)
+
+	return func(remoteAddr string) bool {
+		now := time.Now()
+		mu.Lock()
+		if v, hit := cache[remoteAddr]; hit && v.exp.After(now) {
+			mu.Unlock()
+			return v.ok
+		}
+		mu.Unlock()
+
+		ok := check(remoteAddr)
+
+		mu.Lock()
+		if len(cache) >= admitVerdictMax {
+			clear(cache)
+		}
+		cache[remoteAddr] = verdict{ok: ok, exp: now.Add(ttl)}
+		mu.Unlock()
+		return ok
+	}
+}
+
 // HandleUserTCPConnection is used for incoming user TCP connections.
 func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 	xl := xlog.FromContextSafe(pxy.Context())
@@ -285,10 +407,25 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 		ProxyType:  cfg.Type,
 		RemoteAddr: userConn.RemoteAddr().String(),
 	}
-	_, err := rc.PluginManager.NewUserConn(content)
-	if err != nil {
-		xl.Warnf("the user conn [%s] was rejected, err:%v", content.RemoteAddr, err)
-		return
+	// The frps-side port the user dialed: what a firewall rule matches on, and
+	// what tells us a connection is frps reaching its own machinery.
+	dstPort := addrPort(userConn.LocalAddr())
+
+	// Native firewall: reject the user connection before it reaches the tunnel.
+	if fw := rc.Firewall; fw != nil {
+		if ok, reason := fw.Allow(content.RemoteAddr, dstPort); !ok {
+			xl.Warnf("user conn [%s] to proxy [%s] rejected by firewall: %s", content.RemoteAddr, content.ProxyName, reason)
+			return
+		}
+	}
+	// Server plugin hook, unless this is frps dialing a plugin published
+	// through one of our own proxies - the hook call is itself a user
+	// connection, so running the hook on it would call the plugin again.
+	if !rc.PluginManager.IsSelfCall(content.RemoteAddr, dstPort) {
+		if _, err := rc.PluginManager.NewUserConn(content); err != nil {
+			xl.Warnf("the user conn [%s] was rejected, err:%v", content.RemoteAddr, err)
+			return
+		}
 	}
 
 	// try all connections from the pool
@@ -325,12 +462,26 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 	name := pxy.GetName()
 	proxyType := cfg.Type
-	metrics.Server.OpenConnection(name, proxyType)
+	closed := pxy.openUserConn(content.RemoteAddr)
 	inCount, outCount, _ := pxy.joinUserConnection(local, userConn, proxyType, xl)
-	metrics.Server.CloseConnection(name, proxyType)
+	closed()
 	metrics.Server.AddTrafficIn(name, proxyType, inCount)
 	metrics.Server.AddTrafficOut(name, proxyType, outCount)
 	xl.Debugf("join connections closed")
+}
+
+// openUserConn reports a user connection as open and returns the function that
+// reports it closed again. Proxies with a peer tracker count the peer behind
+// remoteAddr; every other proxy counts the connection itself.
+func (pxy *BaseProxy) openUserConn(remoteAddr string) func() {
+	if t := pxy.peers; t != nil {
+		t.acquire(remoteAddr)
+		return func() { t.release(remoteAddr) }
+	}
+	name := pxy.GetName()
+	proxyType := pxy.configurer.GetBaseConfig().Type
+	metrics.Server.OpenConnection(name, proxyType)
+	return func() { metrics.Server.CloseConnection(name, proxyType) }
 }
 
 func (pxy *BaseProxy) joinUserConnection(local io.ReadWriteCloser, userConn net.Conn, proxyType string, xl *xlog.Logger) (int64, int64, []error) {

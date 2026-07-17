@@ -50,6 +50,7 @@ import (
 	"github.com/fatedier/frp/pkg/util/vhost"
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server/controller"
+	"github.com/fatedier/frp/server/firewall"
 	"github.com/fatedier/frp/server/group"
 	"github.com/fatedier/frp/server/metrics"
 	"github.com/fatedier/frp/server/ports"
@@ -181,6 +182,13 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	}
 	if webServer != nil {
 		webServer.RouteRegister(svr.registerRouteHandlers)
+	}
+
+	// Native firewall for user-connection access control (rules managed from
+	// the dashboard, persisted to a JSON file next to frps).
+	var fwErr error
+	if svr.rc.Firewall, fwErr = firewall.New("frps_firewall.json"); fwErr != nil {
+		return nil, fmt.Errorf("init firewall: %v", fwErr)
 	}
 
 	// Create tcpmux httpconnect multiplexer.
@@ -441,7 +449,11 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 
 	acceptedConn, err := svr.acceptConnection(ctx, conn)
 	if err != nil {
-		log.Tracef("failed to accept frp connection: %v", err)
+		// Anything that reaches the bind port but is not a frp client lands
+		// here: port scanners, health checks, a misconfigured frpc. Worth a
+		// warning with the address, so it can be answered with a firewall rule
+		// - that is the only thing that makes the line actionable.
+		log.Warnf("client conn [%s] was not a valid frp connection: %v", conn.RemoteAddr(), err)
 		conn.Close()
 		return
 	}
@@ -472,14 +484,14 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 		}
 
 		if err != nil {
-			xl.Warnf("register control error: %v", err)
+			xl.Warnf("client conn [%s] register control error: %v", conn.RemoteAddr(), err)
 			if writeErr := writeWithDeadline(conn, connWriteTimeout, func() error {
 				return acceptedConn.conn.WriteMsg(&msg.LoginResp{
 					Version: version.Full(),
 					Error:   util.GenerateResponseErrorString("register control error", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
 				})
 			}); writeErr != nil {
-				xl.Warnf("write login error response error: %v", writeErr)
+				xl.Warnf("client conn [%s] write login error response error: %v", conn.RemoteAddr(), writeErr)
 			}
 			conn.Close()
 			return
@@ -491,7 +503,7 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 				Error:   "",
 			})
 		}); err != nil {
-			xl.Warnf("write login response error: %v", err)
+			xl.Warnf("client conn [%s] write login response error: %v", conn.RemoteAddr(), err)
 			svr.ctlManager.Del(m.RunID, ctl)
 			svr.clientRegistry.MarkOfflineByRunID(m.RunID)
 			conn.Close()
@@ -513,7 +525,7 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 		}
 	case *msg.NewVisitorConn:
 		if err = svr.RegisterVisitorConn(conn, m, acceptedConn.wireProtocol); err != nil {
-			xl.Warnf("register visitor conn error: %v", err)
+			xl.Warnf("client conn [%s] register visitor conn error: %v", conn.RemoteAddr(), err)
 			_ = acceptedConn.conn.WriteMsg(&msg.NewVisitorConnResp{
 				ProxyName: m.ProxyName,
 				Error:     util.GenerateResponseErrorString("register visitor conn error", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
@@ -654,6 +666,29 @@ func (ac *acceptedConnection) handleClientHello(conn net.Conn, wireConn *wire.Co
 	return nil
 }
 
+// localPort is the port a connection landed on, which is what a firewall rule
+// names. Returns 0 when the address carries no port.
+func localPort(addr net.Addr) int {
+	if addr == nil {
+		return 0
+	}
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		return a.Port
+	case *net.UDPAddr:
+		return a.Port
+	}
+	_, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // HandleListener accepts connections from client and call handleConnection to handle them.
 // If internal is true, it means that this listener is used for internal communication like ssh tunnel gateway.
 // TODO(fatedier): Pass some parameters of listener/connection through context to avoid passing too many parameters.
@@ -665,6 +700,17 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 			log.Warnf("listener for incoming connections from client closed")
 			return
 		}
+		// Native firewall: drop blocked clients before the TLS handshake.
+		// Skipped for internal listeners (ssh tunnel gateway), which are not
+		// real remote peers.
+		if !internal && svr.rc.Firewall != nil {
+			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String(), localPort(c.LocalAddr())); !ok {
+				log.Warnf("client conn [%s] to control port rejected by firewall: %s", c.RemoteAddr(), reason)
+				c.Close()
+				continue
+			}
+		}
+
 		// inject xlog object into net.Conn context
 		xl := xlog.New()
 		ctx := context.Background()
@@ -678,7 +724,7 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 			var isTLS, custom bool
 			c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, connReadTimeout)
 			if err != nil {
-				log.Warnf("checkAndEnableTLSServerConnWithTimeout error: %v", err)
+				log.Warnf("client conn [%s] failed the TLS check: %v", originConn.RemoteAddr(), err)
 				originConn.Close()
 				continue
 			}
@@ -723,6 +769,14 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 		if err != nil {
 			log.Warnf("quic listener for incoming connections from client closed")
 			return
+		}
+		// Native firewall: drop blocked clients before any stream is accepted.
+		if svr.rc.Firewall != nil {
+			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String(), localPort(c.LocalAddr())); !ok {
+				log.Warnf("client conn [%s] to quic control port rejected by firewall: %s", c.RemoteAddr(), reason)
+				_ = c.CloseWithError(0, "")
+				continue
+			}
 		}
 		// Start a new goroutine to handle connection.
 		go func(ctx context.Context, frpConn *quic.Conn) {
@@ -811,7 +865,7 @@ func (svr *Service) RegisterWorkConn(workConn *msg.Conn, newMsg *msg.NewWorkConn
 	xl := netpkg.NewLogFromConn(workConn)
 	ctl, exist := svr.ctlManager.GetByID(newMsg.RunID)
 	if !exist {
-		xl.Warnf("no client control found for run id [%s]", newMsg.RunID)
+		xl.Warnf("client conn [%s] sent a work conn for unknown run id [%s]", workConn.RemoteAddr(), newMsg.RunID)
 		return fmt.Errorf("no client control found for run id [%s]", newMsg.RunID)
 	}
 
@@ -831,7 +885,7 @@ func (svr *Service) RegisterWorkConn(workConn *msg.Conn, newMsg *msg.NewWorkConn
 		err = ctl.sessionCtx.AuthVerifier.VerifyNewWorkConn(newMsg)
 	}
 	if err != nil {
-		xl.Warnf("invalid NewWorkConn with run id [%s]", newMsg.RunID)
+		xl.Warnf("client conn [%s] sent an invalid work conn for run id [%s]", workConn.RemoteAddr(), newMsg.RunID)
 		return err
 	}
 	return ctl.RegisterWorkConn(proxy.NewWorkConn(workConn))
