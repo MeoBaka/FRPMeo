@@ -97,6 +97,11 @@ type BaseProxy struct {
 	configurer    v1.ProxyConfigurer
 	wireProtocol  string
 
+	// peers, when set, makes this proxy report distinct peer IPs rather than
+	// individual connections. Set by proxy types whose halves serve the same
+	// peer over two transports (tcp+udp).
+	peers *peerTracker
+
 	mu  sync.RWMutex
 	xl  *xlog.Logger
 	ctx context.Context
@@ -412,12 +417,26 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 	name := pxy.GetName()
 	proxyType := cfg.Type
-	metrics.Server.OpenConnection(name, proxyType)
+	closed := pxy.openUserConn(content.RemoteAddr)
 	inCount, outCount, _ := pxy.joinUserConnection(local, userConn, proxyType, xl)
-	metrics.Server.CloseConnection(name, proxyType)
+	closed()
 	metrics.Server.AddTrafficIn(name, proxyType, inCount)
 	metrics.Server.AddTrafficOut(name, proxyType, outCount)
 	xl.Debugf("join connections closed")
+}
+
+// openUserConn reports a user connection as open and returns the function that
+// reports it closed again. Proxies with a peer tracker count the peer behind
+// remoteAddr; every other proxy counts the connection itself.
+func (pxy *BaseProxy) openUserConn(remoteAddr string) func() {
+	if t := pxy.peers; t != nil {
+		t.acquire(remoteAddr)
+		return func() { t.release(remoteAddr) }
+	}
+	name := pxy.GetName()
+	proxyType := pxy.configurer.GetBaseConfig().Type
+	metrics.Server.OpenConnection(name, proxyType)
+	return func() { metrics.Server.CloseConnection(name, proxyType) }
 }
 
 func (pxy *BaseProxy) joinUserConnection(local io.ReadWriteCloser, userConn net.Conn, proxyType string, xl *xlog.Logger) (int64, int64, []error) {

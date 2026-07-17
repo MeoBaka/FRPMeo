@@ -95,6 +95,15 @@ func (pxy *TCPUDPProxy) Run() (remoteAddr string, err error) {
 		}
 	}()
 
+	// Both halves serve the same peers, so they share one tracker: an IP that
+	// uses tcp and udp is one connection in the stats, not two.
+	name := pxy.GetName()
+	proxyType := pxy.GetConfigurer().GetBaseConfig().Type
+	pxy.peers = newPeerTracker(
+		func() { metrics.Server.OpenConnection(name, proxyType) },
+		func() { metrics.Server.CloseConnection(name, proxyType) },
+	)
+
 	// --- TCP listener ---
 	listener, errRet := net.Listen("tcp", net.JoinHostPort(pxy.serverCfg.ProxyBindAddr, strconv.Itoa(pxy.realBindPort)))
 	if errRet != nil {
@@ -251,12 +260,11 @@ func (pxy *TCPUDPProxy) runUDPRelay() {
 		}
 	}()
 
-	// Count distinct UDP source addresses as "connections" for the UDP half.
-	name := pxy.GetName()
-	proxyType := pxy.GetConfigurer().GetBaseConfig().Type
+	// Feed UDP sessions into the same peer tracker the TCP half uses, so a peer
+	// on both transports is only counted once.
 	tracker := &udp.SessionTracker{
-		OnOpen:      func() { metrics.Server.OpenConnection(name, proxyType) },
-		OnClose:     func() { metrics.Server.CloseConnection(name, proxyType) },
+		OnOpen:      pxy.peers.acquire,
+		OnClose:     pxy.peers.release,
 		IdleTimeout: time.Duration(pxy.serverCfg.UDPSessionTimeout) * time.Second,
 	}
 	go func() {

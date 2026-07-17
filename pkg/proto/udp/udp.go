@@ -44,10 +44,12 @@ func GetContent(m *msg.UDPPacket) (buf []byte, err error) {
 // ForwardUserConn so a connectionless UDP proxy can still report a meaningful
 // "current connections" count. OnOpen fires when a new source first sends a
 // packet; OnClose fires when that source has been idle for IdleTimeout (default
-// 30s) or when forwarding stops. It is optional — pass nil to disable tracking.
+// 30s) or when forwarding stops. Both receive the source address, so a caller
+// that also serves the same peers over TCP can reconcile the two. It is
+// optional — pass nil to disable tracking.
 type SessionTracker struct {
-	OnOpen      func()
-	OnClose     func()
+	OnOpen      func(remoteAddr string)
+	OnClose     func(remoteAddr string)
 	IdleTimeout time.Duration
 }
 
@@ -90,8 +92,8 @@ func ForwardUserConn(
 		// On exit, release every still-open session so the counter rebalances.
 		defer func() {
 			sessMu.Lock()
-			for range sessions {
-				tracker.OnClose()
+			for addr := range sessions {
+				tracker.OnClose(addr)
 			}
 			sessions = make(map[string]time.Time)
 			sessMu.Unlock()
@@ -108,7 +110,7 @@ func ForwardUserConn(
 					for addr, last := range sessions {
 						if now.Sub(last) > tracker.IdleTimeout {
 							delete(sessions, addr)
-							tracker.OnClose()
+							tracker.OnClose(addr)
 						}
 					}
 					sessMu.Unlock()
@@ -132,7 +134,7 @@ func ForwardUserConn(
 			key := remoteAddr.String()
 			sessMu.Lock()
 			if _, ok := sessions[key]; !ok {
-				tracker.OnOpen()
+				tracker.OnOpen(key)
 			}
 			sessions[key] = time.Now()
 			sessMu.Unlock()
