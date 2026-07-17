@@ -16,8 +16,33 @@ package proxy
 
 import (
 	"net"
+	"strconv"
 	"sync"
 )
+
+// addrPort extracts the port from a net.Addr, or 0 if it has none. Firewall
+// rules match on the frps-side port a connection landed on, which for an
+// accepted connection is its local address.
+func addrPort(addr net.Addr) int {
+	if addr == nil {
+		return 0
+	}
+	if a, ok := addr.(*net.TCPAddr); ok {
+		return a.Port
+	}
+	if a, ok := addr.(*net.UDPAddr); ok {
+		return a.Port
+	}
+	_, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return 0
+	}
+	return n
+}
 
 // peerTracker counts distinct peer IPs instead of individual connections.
 //

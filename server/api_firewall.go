@@ -49,6 +49,12 @@ func (svr *Service) apiFirewallPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body.Rules[i].Action = a
+		// Reject a bad port spec here rather than let it sit in a rule that
+		// silently never matches.
+		if err := firewall.ParsePortSpec(body.Rules[i].Port); err != nil {
+			apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		if body.Rules[i].ID == "" {
 			body.Rules[i].ID = fwRandID()
 		}

@@ -15,7 +15,8 @@
 // Package firewall is a native access-control layer for frps. A user connection
 // is decided (only when the firewall is enabled) in this order:
 //
-//  1. Manual rules - ordered allow/deny by IP/CIDR + proxy + user (first match).
+//  1. Manual rules - ordered allow/deny by IP/CIDR + destination port (first
+//     match).
 //  2. Reputation provider (optional) - for still-unknown source IPs, ask an
 //     external blacklist API whether the IP is blocked. This can be an
 //     FRPControl service (frps knows its API - you only supply URL + key) or a
@@ -42,13 +43,19 @@ import (
 	"time"
 )
 
-// Rule is a manual, ordered allow/deny rule. Empty CIDR/Proxy/User matches any.
+// Rule is a manual, ordered allow/deny rule. An empty CIDR or Port matches any.
+//
+// Rules match on the frps-side port a connection arrived on rather than on the
+// proxy name or owner: a port is what a client actually dials and it belongs to
+// one proxy at a time, while a proxy can come back under a different name and
+// silently take its old rule out of play.
 type Rule struct {
-	ID        string `json:"id"`
-	Action    string `json:"action"` // "allow" | "deny"
-	CIDR      string `json:"cidr"`   // "1.2.3.0/24", "::1", "1.2.3.4", "" or "*" = any
-	Proxy     string `json:"proxy"`  // glob, "" or "*" = any
-	User      string `json:"user"`   // glob, "" or "*" = any
+	ID     string `json:"id"`
+	Action string `json:"action"` // "allow" | "deny"
+	CIDR   string `json:"cidr"`   // "1.2.3.0/24", "::1", "1.2.3.4", "" or "*" = any
+	// Port is a Windows-firewall style spec: "6000", "6000-6010",
+	// "80,443,7000-7010", or "" / "*" / "all" for any port.
+	Port      string `json:"port"`
 	Note      string `json:"note,omitempty"`
 	ExpiresAt int64  `json:"expiresAt,omitempty"` // unix sec, 0 = permanent
 }
@@ -194,19 +201,20 @@ func (f *Firewall) sweep() {
 // port at all (checked on accept, before login). It is opt-in via the
 // controlPort toggle: protecting the control port with a deny-by-default policy
 // locks out every client, so existing setups keep the old behavior until asked.
-// Only IP-scoped rules can match here - there is no proxy or user yet.
-func (f *Firewall) AllowControl(remoteAddr string) (bool, string) {
+// port is the control port itself, so a rule can name it like any other.
+func (f *Firewall) AllowControl(remoteAddr string, port int) (bool, string) {
 	f.mu.RLock()
 	on := f.enabled && f.controlPort
 	f.mu.RUnlock()
 	if !on {
 		return true, "control port not protected"
 	}
-	return f.Allow(remoteAddr, "", "")
+	return f.Allow(remoteAddr, port)
 }
 
-// Allow decides whether a user connection is permitted.
-func (f *Firewall) Allow(remoteAddr, proxy, user string) (bool, string) {
+// Allow decides whether a user connection is permitted. port is the frps-side
+// port the connection arrived on.
+func (f *Firewall) Allow(remoteAddr string, port int) (bool, string) {
 	f.mu.RLock()
 	if !f.enabled {
 		f.mu.RUnlock()
@@ -220,7 +228,7 @@ func (f *Firewall) Allow(remoteAddr, proxy, user string) (bool, string) {
 		if r.ExpiresAt != 0 && r.ExpiresAt <= now {
 			continue
 		}
-		if matchCIDR(r.CIDR, ip) && matchGlob(r.Proxy, proxy) && matchGlob(r.User, user) {
+		if matchCIDR(r.CIDR, ip) && matchPort(r.Port, port) {
 			allow := strings.ToLower(r.Action) == "allow"
 			f.mu.RUnlock()
 			return allow, "rule " + r.ID
@@ -467,32 +475,68 @@ func matchCIDR(cidr string, ip net.IP) bool {
 }
 
 // matchGlob supports a single '*' wildcard anywhere (prefix*, *suffix, a*b, *).
-func matchGlob(pat, s string) bool {
-	pat = strings.TrimSpace(pat)
-	if pat == "" || pat == "*" {
+// matchPort reports whether port satisfies a Windows-firewall style spec:
+// "" / "*" / "all" for any, otherwise a comma-separated list of single ports
+// and lo-hi ranges, e.g. "80,443,7000-7010". A malformed entry never matches,
+// so a typo cannot silently widen a deny rule into "any port"; ParsePortSpec
+// rejects it at the API instead.
+func matchPort(spec string, port int) bool {
+	spec = strings.TrimSpace(spec)
+	if spec == "" || spec == "*" || strings.EqualFold(spec, "all") {
 		return true
 	}
-	if !strings.Contains(pat, "*") {
-		return strings.EqualFold(pat, s)
-	}
-	parts := strings.Split(strings.ToLower(pat), "*")
-	sl := strings.ToLower(s)
-	if parts[0] != "" && !strings.HasPrefix(sl, parts[0]) {
-		return false
-	}
-	if last := parts[len(parts)-1]; last != "" && !strings.HasSuffix(sl, last) {
-		return false
-	}
-	pos := 0
-	for _, p := range parts {
-		if p == "" {
-			continue
+	for part := range strings.SplitSeq(spec, ",") {
+		lo, hi, ok := parsePortRange(part)
+		if ok && port >= lo && port <= hi {
+			return true
 		}
-		i := strings.Index(sl[pos:], p)
-		if i < 0 {
-			return false
-		}
-		pos += i + len(p)
 	}
-	return true
+	return false
+}
+
+// parsePortRange reads one entry of a port spec: "6000" or "6000-6010".
+func parsePortRange(part string) (lo, hi int, ok bool) {
+	part = strings.TrimSpace(part)
+	if part == "" {
+		return 0, 0, false
+	}
+	before, after, isRange := strings.Cut(part, "-")
+	lo, err := parsePort(before)
+	if err != nil {
+		return 0, 0, false
+	}
+	if !isRange {
+		return lo, lo, true
+	}
+	hi, err = parsePort(after)
+	if err != nil || hi < lo {
+		return 0, 0, false
+	}
+	return lo, hi, true
+}
+
+func parsePort(s string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 || n > 65535 {
+		return 0, fmt.Errorf("port %d out of range", n)
+	}
+	return n, nil
+}
+
+// ParsePortSpec validates a rule's port spec, so a bad one is rejected when the
+// rule is saved rather than quietly failing to match later.
+func ParsePortSpec(spec string) error {
+	spec = strings.TrimSpace(spec)
+	if spec == "" || spec == "*" || strings.EqualFold(spec, "all") {
+		return nil
+	}
+	for part := range strings.SplitSeq(spec, ",") {
+		if _, _, ok := parsePortRange(part); !ok {
+			return fmt.Errorf("invalid port %q: want a port, a lo-hi range, or all", strings.TrimSpace(part))
+		}
+	}
+	return nil
 }

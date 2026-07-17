@@ -662,6 +662,29 @@ func (ac *acceptedConnection) handleClientHello(conn net.Conn, wireConn *wire.Co
 	return nil
 }
 
+// localPort is the port a connection landed on, which is what a firewall rule
+// names. Returns 0 when the address carries no port.
+func localPort(addr net.Addr) int {
+	if addr == nil {
+		return 0
+	}
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		return a.Port
+	case *net.UDPAddr:
+		return a.Port
+	}
+	_, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // HandleListener accepts connections from client and call handleConnection to handle them.
 // If internal is true, it means that this listener is used for internal communication like ssh tunnel gateway.
 // TODO(fatedier): Pass some parameters of listener/connection through context to avoid passing too many parameters.
@@ -677,7 +700,7 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 		// Skipped for internal listeners (ssh tunnel gateway), which are not
 		// real remote peers.
 		if !internal && svr.rc.Firewall != nil {
-			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String()); !ok {
+			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String(), localPort(c.LocalAddr())); !ok {
 				log.Warnf("client conn [%s] to control port rejected by firewall: %s", c.RemoteAddr(), reason)
 				c.Close()
 				continue
@@ -745,7 +768,7 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 		}
 		// Native firewall: drop blocked clients before any stream is accepted.
 		if svr.rc.Firewall != nil {
-			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String()); !ok {
+			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String(), localPort(c.LocalAddr())); !ok {
 				log.Warnf("client conn [%s] to quic control port rejected by firewall: %s", c.RemoteAddr(), reason)
 				_ = c.CloseWithError(0, "")
 				continue

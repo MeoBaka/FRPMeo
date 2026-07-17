@@ -291,34 +291,35 @@ const (
 // newUDPFirewallFilter returns a per-source firewall predicate for the UDP
 // proxies (udp, pe, and the UDP half of tcp+udp), which have their own read
 // loop and never reach handleUserTCPConnection. Verdicts are cached because
-// this runs per packet. It returns nil when no firewall is configured, so the
-// caller pays nothing.
-func (pxy *BaseProxy) newUDPFirewallFilter() func(string) bool {
-	return pxy.newFirewallFilter("udp packets from", udpFirewallVerdictTTL)
+// this runs per packet. port is the frps-side port they listen on. It returns
+// nil when no firewall is configured, so the caller pays nothing.
+func (pxy *BaseProxy) newUDPFirewallFilter(port int) func(string) bool {
+	return pxy.newFirewallFilter("udp packets from", port, udpFirewallVerdictTTL)
 }
 
 // newHTTPFirewallFilter returns a per-request firewall predicate for http
 // proxies, which are served by the vhost reverse proxy and never reach
 // handleUserTCPConnection either. The reverse proxy pools work connections, so
-// this has to be per request rather than per connection.
-func (pxy *BaseProxy) newHTTPFirewallFilter() vhost.AllowFunc {
-	return pxy.newFirewallFilter("user conn", 0)
+// this has to be per request rather than per connection. port is the shared
+// vhost http port, which is what a rule can name - every http proxy answers on
+// it, so a port rule here covers all of them rather than one.
+func (pxy *BaseProxy) newHTTPFirewallFilter(port int) vhost.AllowFunc {
+	return pxy.newFirewallFilter("user conn", port, 0)
 }
 
 // newFirewallFilter builds a firewall predicate keyed by source address. A
 // non-zero ttl caches verdicts for that long, trading rule-change latency for
 // not consulting the firewall on every packet; ttl 0 asks every time.
-func (pxy *BaseProxy) newFirewallFilter(what string, ttl time.Duration) func(string) bool {
+func (pxy *BaseProxy) newFirewallFilter(what string, port int, ttl time.Duration) func(string) bool {
 	fw := pxy.GetResourceController().Firewall
 	if fw == nil {
 		return nil
 	}
 	xl := xlog.FromContextSafe(pxy.Context())
 	name := pxy.GetName()
-	user := pxy.GetUserInfo().User
 
 	check := func(remoteAddr string) bool {
-		ok, reason := fw.Allow(remoteAddr, name, user)
+		ok, reason := fw.Allow(remoteAddr, port)
 		if !ok {
 			xl.Warnf("%s [%s] to proxy [%s] rejected by firewall: %s", what, remoteAddr, name, reason)
 		}
@@ -371,8 +372,9 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 		RemoteAddr: userConn.RemoteAddr().String(),
 	}
 	// Native firewall: reject the user connection before it reaches the tunnel.
+	// The port a rule matches is the frps-side port the user dialed.
 	if fw := rc.Firewall; fw != nil {
-		if ok, reason := fw.Allow(content.RemoteAddr, content.ProxyName, content.User.User); !ok {
+		if ok, reason := fw.Allow(content.RemoteAddr, addrPort(userConn.LocalAddr())); !ok {
 			xl.Warnf("user conn [%s] to proxy [%s] rejected by firewall: %s", content.RemoteAddr, content.ProxyName, reason)
 			return
 		}

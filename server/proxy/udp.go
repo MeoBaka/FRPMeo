@@ -261,7 +261,7 @@ func (pxy *UDPProxy) Run() (remoteAddr string, err error) {
 		IdleTimeout: time.Duration(pxy.serverCfg.UDPSessionTimeout) * time.Second,
 	}
 	go func() {
-		udp.ForwardUserConn(udpConn, pxy.readCh, pxy.sendCh, int(pxy.serverCfg.UDPPacketSize), tracker, pxy.newUDPFirewallFilter())
+		udp.ForwardUserConn(udpConn, pxy.readCh, pxy.sendCh, int(pxy.serverCfg.UDPPacketSize), tracker, pxy.newUDPFirewallFilter(pxy.realBindPort))
 		pxy.Close()
 	}()
 	return remoteAddr, nil
