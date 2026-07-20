@@ -36,6 +36,7 @@ import (
 	"github.com/fatedier/frp/pkg/policy/featuregate"
 	"github.com/fatedier/frp/pkg/policy/security"
 	"github.com/fatedier/frp/pkg/util/log"
+	svcpkg "github.com/fatedier/frp/pkg/util/service"
 	"github.com/fatedier/frp/pkg/util/version"
 )
 
@@ -215,5 +216,15 @@ func startServiceWithAggregator(
 	if shouldGracefulClose {
 		go handleTermSignal(svr)
 	}
-	return svr.Run(context.Background())
+
+	// Under a service manager, hand the run loop to it: on Windows the SCM has
+	// to be answered or it kills the process, and on either platform this is
+	// what lets a stop request shut frpc down cleanly.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var runErr error
+	if err := svcpkg.Run("frpc", func() { runErr = svr.Run(ctx) }, cancel); err != nil {
+		return err
+	}
+	return runErr
 }

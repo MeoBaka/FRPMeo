@@ -20,7 +20,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	httppkg "github.com/fatedier/frp/pkg/util/http"
+	"github.com/fatedier/frp/pkg/util/log"
 	netpkg "github.com/fatedier/frp/pkg/util/net"
+	svcpkg "github.com/fatedier/frp/pkg/util/service"
 	adminapi "github.com/fatedier/frp/server/http"
 )
 
@@ -47,6 +49,9 @@ func (svr *Service) registerRouteHandlers(helper *httppkg.RouterRegisterHelper) 
 	subRouter.HandleFunc("/api/clients", httppkg.MakeHTTPHandlerFunc(apiController.APIClientList)).Methods("GET")
 	subRouter.HandleFunc("/api/clients/{key}", httppkg.MakeHTTPHandlerFunc(apiController.APIClientDetail)).Methods("GET")
 	subRouter.HandleFunc("/api/proxies", httppkg.MakeHTTPHandlerFunc(apiController.DeleteProxies)).Methods("DELETE")
+
+	// Restart, for a panel to bring frps back after an update replaced it.
+	subRouter.HandleFunc("/api/restart", svcpkg.RestartHandler(log.Infof)).Methods("POST")
 
 	// native firewall (dashboard, behind basic auth)
 	subRouter.HandleFunc("/api/firewall", svr.apiFirewallGet).Methods("GET")
