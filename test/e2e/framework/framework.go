@@ -84,7 +84,11 @@ func (f *Framework) BeforeEach() {
 
 	dir, err := os.MkdirTemp(os.TempDir(), "frp-e2e-test-*")
 	ExpectNoError(err)
-	f.TempDirectory = dir
+	// Forward slashes, even on Windows. Tests paste this straight into config
+	// templates, and TOML reads a backslash in a quoted string as the start of
+	// an escape - a path like C:\Users\... makes the whole file unparsable.
+	// Every os call here takes forward slashes on Windows too.
+	f.TempDirectory = filepath.ToSlash(dir)
 
 	f.mockServers = NewMockServers(f.portAllocator)
 	if err := f.mockServers.Run(); err != nil {
@@ -274,5 +278,7 @@ func (f *Framework) WriteTempFile(name string, content string) string {
 	filePath := filepath.Join(f.TempDirectory, name)
 	err := os.WriteFile(filePath, []byte(content), 0o600)
 	ExpectNoError(err)
-	return filePath
+	// See BeforeEach: callers put this path into config templates, where a
+	// Windows backslash would be read as a TOML escape.
+	return filepath.ToSlash(filePath)
 }

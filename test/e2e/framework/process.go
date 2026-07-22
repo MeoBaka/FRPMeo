@@ -43,6 +43,7 @@ func (f *Framework) RunProcessesWithBinaries(
 	}
 
 	serverProcess := process.NewWithEnvs(serverBinaryPath, []string{"-c", serverPath}, f.osEnvs)
+	serverProcess.SetDir(f.TempDirectory)
 	f.serverConfPaths = append(f.serverConfPaths, serverPath)
 	f.serverProcesses = append(f.serverProcesses, serverProcess)
 	err = serverProcess.Start()
@@ -66,6 +67,7 @@ func (f *Framework) RunProcessesWithBinaries(
 		}
 
 		p := process.NewWithEnvs(clientBinaryPath, []string{"-c", path}, f.osEnvs)
+		p.SetDir(f.TempDirectory)
 		f.clientConfPaths = append(f.clientConfPaths, path)
 		f.clientProcesses = append(f.clientProcesses, p)
 		clientProcesses = append(clientProcesses, p)
@@ -95,6 +97,7 @@ func (f *Framework) RunProcessesWithBinaries(
 
 func (f *Framework) RunFrps(args ...string) (*process.Process, string, error) {
 	p := process.NewWithEnvs(TestContext.FRPServerPath, args, f.osEnvs)
+	p.SetDir(f.TempDirectory)
 	f.serverProcesses = append(f.serverProcesses, p)
 	err := p.Start()
 	if err != nil {
@@ -109,6 +112,7 @@ func (f *Framework) RunFrps(args ...string) (*process.Process, string, error) {
 
 func (f *Framework) RunFrpc(args ...string) (*process.Process, string, error) {
 	p := process.NewWithEnvs(TestContext.FRPClientPath, args, f.osEnvs)
+	p.SetDir(f.TempDirectory)
 	f.clientProcesses = append(f.clientProcesses, p)
 	err := p.Start()
 	if err != nil {
@@ -126,7 +130,10 @@ func (f *Framework) GenerateConfigFile(content string) string {
 	path := filepath.Join(f.TempDirectory, fmt.Sprintf("frp-e2e-config-%d", f.configFileIndex))
 	err := os.WriteFile(path, []byte(content), 0o600)
 	ExpectNoError(err)
-	return path
+	// Forward slashes: tests put this path back into a config, in `includes`
+	// among others, and TOML reads a Windows backslash as an escape. See
+	// Framework.BeforeEach.
+	return filepath.ToSlash(path)
 }
 
 // waitForClientProxyReady parses the client config to extract proxy names,

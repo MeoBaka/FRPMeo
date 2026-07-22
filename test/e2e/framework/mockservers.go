@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/fatedier/frp/test/e2e/framework/consts"
 	"github.com/fatedier/frp/test/e2e/mock/server"
@@ -40,7 +41,10 @@ func NewMockServers(portAllocator *port.Allocator) *MockServers {
 	)
 
 	udsIndex := portAllocator.Get()
-	udsAddr := fmt.Sprintf("%s/frp_echo_server_%d.sock", os.TempDir(), udsIndex)
+	// Forward slashes: this address is substituted into a config template as
+	// plugin.unixPath, where a Windows backslash would be read as a TOML
+	// escape and take the whole file down with it.
+	udsAddr := filepath.ToSlash(fmt.Sprintf("%s/frp_echo_server_%d.sock", os.TempDir(), udsIndex))
 	os.Remove(udsAddr)
 	s.udsEchoServer = streamserver.New(streamserver.Unix, streamserver.WithBindAddr(udsAddr))
 	return s

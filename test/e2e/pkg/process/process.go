@@ -60,6 +60,14 @@ func NewWithEnvs(path string, params []string, envs []string) *Process {
 	return p
 }
 
+// SetDir runs the process from dir. frps keeps its firewall state in a file
+// named relative to the working directory, so specs that share one have their
+// frps instances fight over it - on Windows the loser cannot open the file at
+// all and refuses to start.
+func (p *Process) SetDir(dir string) {
+	p.cmd.Dir = dir
+}
+
 func (p *Process) Start() error {
 	if p.started {
 		return errors.New("process already started")

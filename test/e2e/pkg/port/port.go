@@ -58,31 +58,50 @@ func (pa *Allocator) GetByName(portName string) int {
 			return 0
 		}
 
-		l, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
-		if err != nil {
+		if !free(port) {
 			// Maybe not controlled by us, mark it used.
 			pa.used.Insert(port)
 			continue
 		}
-		l.Close()
-
-		udpAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
-		if err != nil {
-			continue
-		}
-		udpConn, err := net.ListenUDP("udp", udpAddr)
-		if err != nil {
-			// Maybe not controlled by us, mark it used.
-			pa.used.Insert(port)
-			continue
-		}
-		udpConn.Close()
 
 		pa.used.Insert(port)
 		pa.reserved.Delete(port)
 		return port
 	}
 	return 0
+}
+
+// free reports whether nothing holds the port, for either protocol, on either
+// of the addresses tests bind: frp listens on the wildcard, the mock servers on
+// the loopback.
+//
+// Both have to be checked. On Windows a wildcard bind does not conflict with a
+// bind to a specific address unless SO_EXCLUSIVEADDRUSE was set, so probing
+// 0.0.0.0 alone reports a port as free while a process from the previous spec
+// still holds 127.0.0.1 on it - and the port is handed out to a server that
+// then fails to start. On Linux the wildcard bind does conflict, so the second
+// probe changes nothing there.
+func free(port int) bool {
+	for _, host := range []string{"0.0.0.0", "127.0.0.1"} {
+		addr := net.JoinHostPort(host, strconv.Itoa(port))
+
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			return false
+		}
+		l.Close()
+
+		udpAddr, err := net.ResolveUDPAddr("udp", addr)
+		if err != nil {
+			return false
+		}
+		udpConn, err := net.ListenUDP("udp", udpAddr)
+		if err != nil {
+			return false
+		}
+		udpConn.Close()
+	}
+	return true
 }
 
 func (pa *Allocator) getByRange(from, to int) int {
