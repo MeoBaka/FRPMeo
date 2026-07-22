@@ -36,6 +36,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -111,6 +112,125 @@ func (p ProviderConfig) effective() ProviderConfig {
 	}
 }
 
+// compiledRule is a Rule with its CIDR and port spec already parsed.
+//
+// Rules change rarely and are matched on every user connection - on every
+// packet for udp - so the parsing happens when the rule arrives rather than
+// when traffic does. What is left on the hot path is a prefix comparison and a
+// few integer comparisons, and nothing on it reaches the heap.
+type compiledRule struct {
+	Rule
+
+	allow   bool
+	anyCIDR bool
+	prefix  netip.Prefix
+	anyPort bool
+	ports   []portRange
+	// reason is what Allow reports when this rule decides, built here so that
+	// deciding does not have to build a string.
+	reason string
+	// never marks a CIDR that does not parse. Such a rule matches nothing,
+	// which is what the old string matcher did with it as well: a rule that
+	// visibly does nothing beats a deny that quietly widens to everything.
+	never bool
+}
+
+// portRange is one entry of a compiled port spec, inclusive at both ends.
+type portRange struct{ lo, hi int }
+
+func compileRules(rules []Rule) []compiledRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]compiledRule, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, compileRule(r))
+	}
+	return out
+}
+
+func compileRule(r Rule) compiledRule {
+	c := compiledRule{
+		Rule:   r,
+		allow:  strings.EqualFold(strings.TrimSpace(r.Action), "allow"),
+		reason: "rule " + r.ID,
+	}
+
+	cidr := strings.TrimSpace(r.CIDR)
+	switch {
+	case cidr == "" || cidr == "*":
+		c.anyCIDR = true
+	case strings.Contains(cidr, "/"):
+		p, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			c.never = true
+			break
+		}
+		if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
+			// "::ffff:1.2.3.0/120" names an IPv4 network. Hold it in the form
+			// addresses are matched in, or it would match none of them.
+			p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
+		}
+		c.prefix = p.Masked()
+	default:
+		addr, err := netip.ParseAddr(cidr)
+		if err != nil {
+			c.never = true
+			break
+		}
+		addr = addr.Unmap()
+		c.prefix = netip.PrefixFrom(addr, addr.BitLen())
+	}
+
+	c.ports, c.anyPort = compilePorts(r.Port)
+	return c
+}
+
+// compilePorts reads a port spec into the ranges it names. A malformed entry is
+// dropped rather than widened, so a spec naming nothing valid matches nothing -
+// see matchPort's old contract, which this keeps.
+func compilePorts(spec string) (ranges []portRange, any bool) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" || spec == "*" || strings.EqualFold(spec, "all") {
+		return nil, true
+	}
+	for part := range strings.SplitSeq(spec, ",") {
+		if lo, hi, ok := parsePortRange(part); ok {
+			ranges = append(ranges, portRange{lo: lo, hi: hi})
+		}
+	}
+	return ranges, false
+}
+
+func (c *compiledRule) match(ip netip.Addr, port int) bool {
+	if c.never {
+		return false
+	}
+	if !c.anyCIDR && (!ip.IsValid() || !c.prefix.Contains(ip)) {
+		return false
+	}
+	return c.anyPort || matchRanges(c.ports, port)
+}
+
+func matchRanges(ranges []portRange, port int) bool {
+	for _, r := range ranges {
+		if port >= r.lo && port <= r.hi {
+			return true
+		}
+	}
+	return false
+}
+
+// plainRules unwraps compiled rules back into what the dashboard and the state
+// file speak in.
+func plainRules(rules []compiledRule) []Rule {
+	out := make([]Rule, len(rules))
+	for i := range rules {
+		out[i] = rules[i].Rule
+	}
+	return out
+}
+
 type state struct {
 	Enabled     *bool          `json:"enabled,omitempty"` // nil = enabled
 	ControlPort bool           `json:"controlPort"`
@@ -142,7 +262,7 @@ type Firewall struct {
 	enabled     bool
 	controlPort bool
 	def         string
-	rules       []Rule
+	rules       []compiledRule
 	provider    ProviderConfig
 	client      *http.Client
 
@@ -182,7 +302,7 @@ func New(path string) (*Firewall, error) {
 		f.enabled = s.Enabled == nil || *s.Enabled
 		f.controlPort = s.ControlPort
 		f.def = orDefault(strings.ToLower(s.Default), "allow")
-		f.rules = s.Rules
+		f.rules = compileRules(s.Rules)
 		f.provider = s.Provider
 	case os.IsNotExist(err):
 	default:
@@ -237,34 +357,38 @@ func (f *Firewall) Allow(remoteAddr string, port int) (bool, string) {
 		return true, "firewall disabled"
 	}
 	now := f.nowFn()
-	ip := parseIP(remoteAddr)
+	ip := parseAddr(remoteAddr)
 
 	// 1) manual rules, in order
-	for _, r := range f.rules {
+	for i := range f.rules {
+		r := &f.rules[i]
 		if r.ExpiresAt != 0 && r.ExpiresAt <= now {
 			continue
 		}
-		if matchCIDR(r.CIDR, ip) && matchPort(r.Port, port) {
-			allow := strings.ToLower(r.Action) == "allow"
+		if r.match(ip, port) {
+			allow, reason := r.allow, r.reason
 			f.mu.RUnlock()
-			return allow, "rule " + r.ID
+			return allow, reason
 		}
 	}
 	provider := f.provider
 	client := f.client
 	def := f.def
-	selfCall := ip != nil && f.isSelfCall(ip, port)
+	selfCall := ip.IsValid() && f.isSelfCall(ip, port)
 	f.mu.RUnlock()
 
 	// 2) external reputation provider for unknown IPs. Our own call out to the
 	// provider is exempt: it is the query, not something to run a query on.
-	if (provider.Mode == "frpcontrol" || provider.Mode == "custom") && ip != nil && !selfCall {
+	if (provider.Mode == "frpcontrol" || provider.Mode == "custom") && ip.IsValid() && !selfCall {
 		if f.checkExternal(ip.String(), provider.effective(), client) {
 			return false, "reputation"
 		}
 	}
 	// 3) default policy
-	return def == "allow", "default " + def
+	if def == "allow" {
+		return true, "default allow"
+	}
+	return false, "default deny"
 }
 
 // checkExternal returns whether ip is blocked according to the provider,
@@ -402,9 +526,10 @@ func truthy(v any) bool {
 func (f *Firewall) Snapshot() Snapshot {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	rules := make([]Rule, len(f.rules))
-	copy(rules, f.rules)
-	return Snapshot{Enabled: f.enabled, ControlPort: f.controlPort, Default: f.def, Rules: rules, Provider: f.provider}
+	return Snapshot{
+		Enabled: f.enabled, ControlPort: f.controlPort, Default: f.def,
+		Rules: plainRules(f.rules), Provider: f.provider,
+	}
 }
 
 // SetConfig replaces enabled/controlPort/default/rules/provider.
@@ -421,7 +546,7 @@ func (f *Firewall) SetConfig(enabled, controlPort bool, def string, rules []Rule
 	f.enabled = enabled
 	f.controlPort = controlPort
 	f.def = def
-	f.rules = rules
+	f.rules = compileRules(rules)
 	f.provider = provider
 	f.buildClientLocked()
 	f.repMu.Lock()
@@ -474,7 +599,7 @@ func (f *Firewall) resolveSelfProviderLocked() {
 // attacker cannot forge this - completing a TCP handshake from a spoofed local
 // address needs to be on the path already, at which point the host is lost
 // anyway.
-func (f *Firewall) isSelfCall(ip net.IP, port int) bool {
+func (f *Firewall) isSelfCall(ip netip.Addr, port int) bool {
 	return f.selfProviderPort != 0 && port == f.selfProviderPort && f.localIPs[ip.String()]
 }
 
@@ -498,7 +623,7 @@ func (f *Firewall) saveLocked() error {
 		return nil
 	}
 	enabled := f.enabled
-	s := state{Enabled: &enabled, ControlPort: f.controlPort, Default: f.def, Rules: f.rules, Provider: f.provider}
+	s := state{Enabled: &enabled, ControlPort: f.controlPort, Default: f.def, Rules: plainRules(f.rules), Provider: f.provider}
 	if s.Rules == nil {
 		s.Rules = []Rule{}
 	}
@@ -522,50 +647,21 @@ func orDefault(s, def string) string {
 	return s
 }
 
-func parseIP(remoteAddr string) net.IP {
+// parseAddr reads the source address of a connection. netip rather than net.IP:
+// an Addr is a value, so this allocates nothing on a path that runs for every
+// user connection and, for udp proxies, every packet.
+func parseAddr(remoteAddr string) netip.Addr {
 	host := remoteAddr
 	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		host = h
 	}
-	return net.ParseIP(strings.TrimSpace(host))
-}
-
-func matchCIDR(cidr string, ip net.IP) bool {
-	cidr = strings.TrimSpace(cidr)
-	if cidr == "" || cidr == "*" {
-		return true
-	}
-	if ip == nil {
-		return false
-	}
-	if !strings.Contains(cidr, "/") {
-		return ip.Equal(net.ParseIP(cidr))
-	}
-	_, n, err := net.ParseCIDR(cidr)
+	addr, err := netip.ParseAddr(strings.TrimSpace(host))
 	if err != nil {
-		return false
+		return netip.Addr{}
 	}
-	return n.Contains(ip)
-}
-
-// matchGlob supports a single '*' wildcard anywhere (prefix*, *suffix, a*b, *).
-// matchPort reports whether port satisfies a Windows-firewall style spec:
-// "" / "*" / "all" for any, otherwise a comma-separated list of single ports
-// and lo-hi ranges, e.g. "80,443,7000-7010". A malformed entry never matches,
-// so a typo cannot silently widen a deny rule into "any port"; ParsePortSpec
-// rejects it at the API instead.
-func matchPort(spec string, port int) bool {
-	spec = strings.TrimSpace(spec)
-	if spec == "" || spec == "*" || strings.EqualFold(spec, "all") {
-		return true
-	}
-	for part := range strings.SplitSeq(spec, ",") {
-		lo, hi, ok := parsePortRange(part)
-		if ok && port >= lo && port <= hi {
-			return true
-		}
-	}
-	return false
+	// An IPv4 client accepted on a dual-stack listener arrives as
+	// ::ffff:a.b.c.d. Unmapping it is what lets an IPv4 rule match it at all.
+	return addr.Unmap()
 }
 
 // parsePortRange reads one entry of a port spec: "6000" or "6000-6010".

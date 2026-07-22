@@ -77,10 +77,18 @@ func TestMatchPort(t *testing.T) {
 		{"6010-6000", 6005, false}, // reversed range
 	}
 	for _, c := range cases {
-		if got := matchPort(c.spec, c.port); got != c.want {
-			t.Errorf("matchPort(%q, %d) = %v, want %v", c.spec, c.port, got, c.want)
+		if got := matchPortSpec(c.spec, c.port); got != c.want {
+			t.Errorf("port spec %q against %d = %v, want %v", c.spec, c.port, got, c.want)
 		}
 	}
+}
+
+// matchPortSpec asks of a spec what Allow asks of a rule, without going through
+// a whole firewall to do it. Allow matches against the compiled form, so the
+// test compiles too rather than checking a second implementation.
+func matchPortSpec(spec string, port int) bool {
+	ranges, any := compilePorts(spec)
+	return any || matchRanges(ranges, port)
 }
 
 func TestParsePortSpec(t *testing.T) {
@@ -224,6 +232,76 @@ func TestAllowIPv6AndCIDR(t *testing.T) {
 	}
 	if ok, _ := f.Allow("[2001:db9::1]:5555", 6000); !ok {
 		t.Error("ipv6 outside the net should pass")
+	}
+}
+
+// An IPv4 client accepted on a dual-stack listener arrives as ::ffff:a.b.c.d.
+// The rule is written in IPv4, and has to match it anyway.
+func TestAllowMatchesIPv4MappedSource(t *testing.T) {
+	f := newTestFirewall(t, []Rule{
+		{ID: "v4", Action: "deny", CIDR: "203.0.113.0/24", Port: "6000"},
+	})
+
+	if ok, _ := f.Allow("203.0.113.45:5555", 6000); ok {
+		t.Error("plain ipv4 should be blocked")
+	}
+	if ok, _ := f.Allow("[::ffff:203.0.113.45]:5555", 6000); ok {
+		t.Error("the same address in ipv4-mapped form should be blocked too")
+	}
+}
+
+// A CIDR with no mask names one address, and only that one.
+func TestAllowBareAddressRule(t *testing.T) {
+	f := newTestFirewall(t, []Rule{
+		{ID: "one", Action: "deny", CIDR: "203.0.113.45", Port: "*"},
+	})
+
+	if ok, _ := f.Allow("203.0.113.45:5555", 6000); ok {
+		t.Error("the named address should be blocked")
+	}
+	if ok, _ := f.Allow("203.0.113.46:5555", 6000); !ok {
+		t.Error("its neighbour should pass")
+	}
+}
+
+// A CIDR that does not parse must match nothing. Matching everything would turn
+// a typo in a deny rule into an outage, and matching nothing is what the rule
+// visibly does.
+func TestAllowMalformedCIDRMatchesNothing(t *testing.T) {
+	f := newTestFirewall(t, []Rule{
+		{ID: "bad", Action: "deny", CIDR: "203.0.113.0/99", Port: "*"},
+		{ID: "junk", Action: "deny", CIDR: "not-an-address", Port: "*"},
+	})
+
+	if ok, _ := f.Allow("203.0.113.45:5555", 6000); !ok {
+		t.Error("a rule with an unparsable CIDR should not block anything")
+	}
+}
+
+// Rules are parsed once, when they arrive. Loading them from the state file is
+// one of the ways they arrive, and a rule read from disk that quietly matched
+// nothing would disable the firewall across a restart.
+func TestRulesLoadedFromDiskStillMatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fw.json")
+	first, err := New(path)
+	if err != nil {
+		t.Fatalf("new firewall: %v", err)
+	}
+	if err := first.SetConfig(true, false, "allow",
+		[]Rule{{ID: "v4", Action: "deny", CIDR: "203.0.113.0/24", Port: "6000-6010"}},
+		ProviderConfig{Mode: "off"}); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+
+	reloaded, err := New(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if ok, reason := reloaded.Allow("203.0.113.45:5555", 6005); ok {
+		t.Errorf("rule read back from disk did not match: %s", reason)
+	}
+	if ok, _ := reloaded.Allow("203.0.113.45:5555", 6011); !ok {
+		t.Error("a port outside the rule's range should still pass")
 	}
 }
 
