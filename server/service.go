@@ -182,6 +182,20 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	}
 	if webServer != nil {
 		webServer.RouteRegister(svr.registerRouteHandlers)
+		// The dashboard opens a port of its own, which nothing else guards.
+		// Rejections are logged at debug on purpose: an exposed port is
+		// scanned continuously, and a warning per probe would be the same
+		// flood the firewall was turned on to stop.
+		if svr.rc.Firewall != nil {
+			port := cfg.WebServer.Port
+			webServer.SetConnFilter(func(remoteAddr string) bool {
+				ok, reason := svr.rc.Firewall.AllowWeb(remoteAddr, port)
+				if !ok {
+					log.Debugf("[FW] reject web %s reason: %s", remoteAddr, reason)
+				}
+				return ok
+			})
+		}
 	}
 
 	// Native firewall for user-connection access control (rules managed from
@@ -286,7 +300,13 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	}
 
 	if cfg.SSHTunnelGateway.BindPort > 0 {
-		sshGateway, err := ssh.NewGateway(cfg.SSHTunnelGateway, cfg.BindAddr, svr.sshTunnelListener)
+		// The gateway opens a port of its own, so it needs the firewall in its
+		// own hands: connections there never pass through HandleListener.
+		var allowSSH ssh.AllowFunc
+		if svr.rc.Firewall != nil {
+			allowSSH = svr.rc.Firewall.AllowControl
+		}
+		sshGateway, err := ssh.NewGateway(cfg.SSHTunnelGateway, cfg.BindAddr, svr.sshTunnelListener, allowSSH)
 		if err != nil {
 			return nil, fmt.Errorf("create ssh gateway error: %v", err)
 		}
@@ -705,7 +725,7 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 		// real remote peers.
 		if !internal && svr.rc.Firewall != nil {
 			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String(), localPort(c.LocalAddr())); !ok {
-				log.Warnf("client conn [%s] to control port rejected by firewall: %s", c.RemoteAddr(), reason)
+				log.Warnf("[FW] reject control %s reason: %s", c.RemoteAddr(), reason)
 				c.Close()
 				continue
 			}
@@ -773,7 +793,7 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 		// Native firewall: drop blocked clients before any stream is accepted.
 		if svr.rc.Firewall != nil {
 			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String(), localPort(c.LocalAddr())); !ok {
-				log.Warnf("client conn [%s] to quic control port rejected by firewall: %s", c.RemoteAddr(), reason)
+				log.Warnf("[FW] reject quic control %s reason: %s", c.RemoteAddr(), reason)
 				_ = c.CloseWithError(0, "")
 				continue
 			}

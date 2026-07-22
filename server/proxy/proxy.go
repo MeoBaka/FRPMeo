@@ -293,7 +293,7 @@ const (
 // loop and never reach handleUserTCPConnection. port is the frps-side port they
 // listen on. Verdicts are always cached: this runs per packet.
 func (pxy *BaseProxy) newUDPAdmitFilter(port int) func(string) bool {
-	return pxy.newAdmitFilter("udp packets from", port, admitVerdictTTL)
+	return pxy.newAdmitFilter("udp", port, admitVerdictTTL)
 }
 
 // newHTTPAdmitFilter returns a per-request admission predicate for http
@@ -314,7 +314,7 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 	if pm := pxy.GetResourceController().PluginManager; pm != nil && pm.HasNewUserConnPlugins() {
 		ttl = admitVerdictTTL
 	}
-	return pxy.newAdmitFilter("user conn", port, ttl)
+	return pxy.newAdmitFilter("conn", port, ttl)
 }
 
 // newAdmitFilter builds the admission predicate for the paths that bypass
@@ -326,6 +326,8 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 // owner, so asking twice about the same source cannot produce a different
 // answer. The cost is that a rule change takes up to ttl to reach traffic
 // already flowing.
+// what names the kind of traffic in log lines, "conn" or "udp". The proxy name
+// and run id are not part of them: the logger already prefixes both.
 func (pxy *BaseProxy) newAdmitFilter(what string, port int, ttl time.Duration) func(string) bool {
 	rc := pxy.GetResourceController()
 	fw := rc.Firewall
@@ -341,7 +343,7 @@ func (pxy *BaseProxy) newAdmitFilter(what string, port int, ttl time.Duration) f
 	check := func(remoteAddr string) bool {
 		if fw != nil {
 			if ok, reason := fw.Allow(remoteAddr, port); !ok {
-				xl.Warnf("%s [%s] to proxy [%s] rejected by firewall: %s", what, remoteAddr, name, reason)
+				xl.Warnf("[FW] reject %s %s reason: %s", what, remoteAddr, reason)
 				return false
 			}
 		}
@@ -355,7 +357,7 @@ func (pxy *BaseProxy) newAdmitFilter(what string, port int, ttl time.Duration) f
 				RemoteAddr: remoteAddr,
 			})
 			if err != nil {
-				xl.Warnf("%s [%s] to proxy [%s] was rejected, err:%v", what, remoteAddr, name, err)
+				xl.Warnf("[plugin] reject %s %s: %v", what, remoteAddr, err)
 				return false
 			}
 		}
@@ -412,9 +414,13 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 	dstPort := addrPort(userConn.LocalAddr())
 
 	// Native firewall: reject the user connection before it reaches the tunnel.
+	//
+	// The run id and the proxy name are already prefixed by the logger, so the
+	// message carries neither - a rejection is common enough that repeating
+	// them costs more than it tells.
 	if fw := rc.Firewall; fw != nil {
 		if ok, reason := fw.Allow(content.RemoteAddr, dstPort); !ok {
-			xl.Warnf("user conn [%s] to proxy [%s] rejected by firewall: %s", content.RemoteAddr, content.ProxyName, reason)
+			xl.Warnf("[FW] reject %s reason: %s", content.RemoteAddr, reason)
 			return
 		}
 	}

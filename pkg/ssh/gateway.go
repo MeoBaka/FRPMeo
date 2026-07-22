@@ -29,6 +29,14 @@ import (
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
 
+// AllowFunc decides whether a peer may open an ssh connection at all. It is
+// handed in rather than reached for: the firewall lives in the server, and the
+// gateway has no business knowing about it.
+//
+// remoteAddr is the peer, port the gateway port it arrived on, so a rule can
+// name that port like any other.
+type AllowFunc func(remoteAddr string, port int) (ok bool, reason string)
+
 type Gateway struct {
 	bindPort int
 	ln       net.Listener
@@ -36,11 +44,16 @@ type Gateway struct {
 	peerServerListener *netpkg.InternalListener
 
 	sshConfig *ssh.ServerConfig
+
+	// allow is consulted before anything is read from a peer. nil means no
+	// firewall is configured, and every peer is let through.
+	allow AllowFunc
 }
 
 func NewGateway(
 	cfg v1.SSHTunnelGateway, bindAddr string,
 	peerServerListener *netpkg.InternalListener,
+	allow AllowFunc,
 ) (*Gateway, error) {
 	sshConfig := &ssh.ServerConfig{}
 
@@ -97,6 +110,7 @@ func NewGateway(
 	return &Gateway{
 		bindPort:           cfg.BindPort,
 		ln:                 ln,
+		allow:              allow,
 		peerServerListener: peerServerListener,
 		sshConfig:          sshConfig,
 	}, nil
@@ -107,6 +121,16 @@ func (g *Gateway) Run() {
 		conn, err := g.ln.Accept()
 		if err != nil {
 			return
+		}
+		// Before the ssh handshake, not after: this port reaches the same
+		// tunnelling as the control port, so a peer the firewall has turned
+		// away there must not get a second door here.
+		if g.allow != nil {
+			if ok, reason := g.allow(conn.RemoteAddr().String(), g.bindPort); !ok {
+				log.Warnf("[FW] reject ssh %s reason: %s", conn.RemoteAddr(), reason)
+				conn.Close()
+				continue
+			}
 		}
 		go g.handleConn(conn)
 	}

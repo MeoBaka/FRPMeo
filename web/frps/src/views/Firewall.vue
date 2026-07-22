@@ -36,6 +36,17 @@
           explicit allow rule.
         </span>
       </div>
+
+      <div class="fg-inline" style="margin-top:12px">
+        <label>Also protect this dashboard</label>
+        <el-switch v-model="snap.webPort" @change="save" />
+        <span class="hint">
+          Applies rules to webServer.port, on accept and so before the TLS
+          handshake. Careful: this page is what edits these rules, so a rule or
+          default policy that blocks the port can only be undone by editing
+          frps_firewall.json on the server and restarting frps.
+        </span>
+      </div>
     </el-card>
 
     <!-- Reputation provider -->
@@ -193,7 +204,7 @@ interface Provider {
   url: string; method: string; body: string; headers: Record<string, string>; blockedPath: string
   cacheTTLSec: number; timeoutMs: number; failOpen: boolean; insecureTLS: boolean
 }
-interface Snap { enabled: boolean; controlPort: boolean; default: string; rules: Rule[]; provider: Provider }
+interface Snap { enabled: boolean; controlPort: boolean; webPort: boolean; default: string; rules: Rule[]; provider: Provider }
 
 function defProvider(): Provider {
   return { mode: 'off', frpControlURL: '', frpControlAPIKey: '', url: '', method: 'GET', body: '', headers: {}, blockedPath: '', cacheTTLSec: 300, timeoutMs: 800, failOpen: false, insecureTLS: false }
@@ -201,7 +212,7 @@ function defProvider(): Provider {
 
 const loading = ref(false)
 const saving = ref(false)
-const snap = reactive<Snap>({ enabled: true, controlPort: false, default: 'allow', rules: [], provider: defProvider() })
+const snap = reactive<Snap>({ enabled: true, controlPort: false, webPort: false, default: 'allow', rules: [], provider: defProvider() })
 
 const headersText = computed({
   get: () => Object.entries(snap.provider.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n'),
@@ -246,6 +257,7 @@ async function load() {
     const s = await http.get<Snap>('../api/firewall')
     snap.enabled = s.enabled
     snap.controlPort = !!s.controlPort
+    snap.webPort = !!s.webPort
     snap.default = s.default || 'allow'
     snap.rules = s.rules || []
     snap.provider = { ...defProvider(), ...(s.provider || {}) }
@@ -264,7 +276,7 @@ async function load() {
 async function persist(okMsg: string) {
   saving.value = true
   try {
-    await http.put('../api/firewall', { enabled: snap.enabled, controlPort: snap.controlPort, default: snap.default, rules: snap.rules, provider: snap.provider })
+    await http.put('../api/firewall', { enabled: snap.enabled, controlPort: snap.controlPort, webPort: snap.webPort, default: snap.default, rules: snap.rules, provider: snap.provider })
     ElMessage.success(okMsg)
     return true
   } catch (e: any) {

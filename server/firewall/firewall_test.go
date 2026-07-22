@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,7 +33,7 @@ func newTestFirewall(t *testing.T, rules []Rule) *Firewall {
 	if err != nil {
 		t.Fatalf("new firewall: %v", err)
 	}
-	if err := f.SetConfig(true, false, "allow", rules, ProviderConfig{Mode: "off"}); err != nil {
+	if err := f.SetConfig(Config{Enabled: true, Default: "allow", Rules: rules, Provider: ProviderConfig{Mode: "off"}}); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
 	return f
@@ -172,7 +173,7 @@ func TestAllowFirstRuleWins(t *testing.T) {
 
 func TestAllowDefaultPolicy(t *testing.T) {
 	f := newTestFirewall(t, nil)
-	if err := f.SetConfig(true, false, "deny", nil, ProviderConfig{Mode: "off"}); err != nil {
+	if err := f.SetConfig(Config{Enabled: true, Default: "deny", Provider: ProviderConfig{Mode: "off"}}); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
 	if ok, _ := f.Allow("10.0.0.1:1", 6000); ok {
@@ -182,7 +183,7 @@ func TestAllowDefaultPolicy(t *testing.T) {
 
 func TestAllowDisabledFirewallAllowsEverything(t *testing.T) {
 	f := newTestFirewall(t, []Rule{{ID: "r", Action: "deny", CIDR: "10.0.0.1", Port: "all"}})
-	if err := f.SetConfig(false, false, "deny", []Rule{{ID: "r", Action: "deny", CIDR: "10.0.0.1", Port: "all"}}, ProviderConfig{Mode: "off"}); err != nil {
+	if err := f.SetConfig(Config{Default: "deny", Rules: []Rule{{ID: "r", Action: "deny", CIDR: "10.0.0.1", Port: "all"}}, Provider: ProviderConfig{Mode: "off"}}); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
 	if ok, _ := f.Allow("10.0.0.1:1", 6000); !ok {
@@ -211,7 +212,7 @@ func TestAllowControlIsOptIn(t *testing.T) {
 		t.Error("control port is not protected by default")
 	}
 
-	if err := f.SetConfig(true, true, "allow", rules, ProviderConfig{Mode: "off"}); err != nil {
+	if err := f.SetConfig(Config{Enabled: true, ControlPort: true, Default: "allow", Rules: rules, Provider: ProviderConfig{Mode: "off"}}); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
 	if ok, _ := f.AllowControl("10.0.0.1:1", 7000); ok {
@@ -219,6 +220,68 @@ func TestAllowControlIsOptIn(t *testing.T) {
 	}
 	if ok, _ := f.AllowControl("10.0.0.2:1", 7000); !ok {
 		t.Error("other ips still get in")
+	}
+}
+
+// The dashboard is where these rules are written, so protecting it is opt-in
+// for a sharper reason than the control port's: a rule that shuts it can only
+// be undone by editing the state file on the host.
+func TestAllowWebIsOptIn(t *testing.T) {
+	rules := []Rule{{ID: "r", Action: "deny", CIDR: "10.0.0.1", Port: "8000"}}
+	f := newTestFirewall(t, rules)
+
+	if ok, reason := f.AllowWeb("10.0.0.1:1", 8000); !ok {
+		t.Errorf("the dashboard is not protected by default, got blocked by %s", reason)
+	}
+
+	if err := f.SetConfig(Config{
+		Enabled: true, WebPort: true, Default: "allow",
+		Rules: rules, Provider: ProviderConfig{Mode: "off"},
+	}); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+	if ok, _ := f.AllowWeb("10.0.0.1:1", 8000); ok {
+		t.Error("with webPort on, a rule naming the port should block")
+	}
+	if ok, _ := f.AllowWeb("10.0.0.2:1", 8000); !ok {
+		t.Error("other ips still reach the dashboard")
+	}
+
+	// The two switches are separate: turning the control port on must not drag
+	// the dashboard in with it.
+	if err := f.SetConfig(Config{
+		Enabled: true, ControlPort: true, Default: "allow",
+		Rules: rules, Provider: ProviderConfig{Mode: "off"},
+	}); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+	if ok, _ := f.AllowWeb("10.0.0.1:1", 8000); !ok {
+		t.Error("controlPort must not protect the dashboard on its own")
+	}
+}
+
+// Both switches survive a restart, or a protected port would quietly open the
+// next time frps started.
+func TestPortSwitchesSurviveReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fw.json")
+	first, err := New(path)
+	if err != nil {
+		t.Fatalf("new firewall: %v", err)
+	}
+	if err := first.SetConfig(Config{
+		Enabled: true, ControlPort: true, WebPort: true, Default: "allow",
+		Provider: ProviderConfig{Mode: "off"},
+	}); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+
+	reloaded, err := New(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got := reloaded.Snapshot()
+	if !got.ControlPort || !got.WebPort {
+		t.Fatalf("switches read back as controlPort=%v webPort=%v, want both on", got.ControlPort, got.WebPort)
 	}
 }
 
@@ -287,9 +350,12 @@ func TestRulesLoadedFromDiskStillMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new firewall: %v", err)
 	}
-	if err := first.SetConfig(true, false, "allow",
-		[]Rule{{ID: "v4", Action: "deny", CIDR: "203.0.113.0/24", Port: "6000-6010"}},
-		ProviderConfig{Mode: "off"}); err != nil {
+	if err := first.SetConfig(Config{
+		Enabled:  true,
+		Default:  "allow",
+		Rules:    []Rule{{ID: "v4", Action: "deny", CIDR: "203.0.113.0/24", Port: "6000-6010"}},
+		Provider: ProviderConfig{Mode: "off"},
+	}); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
 
@@ -323,10 +389,10 @@ func TestAllowSkipsProviderForItsOwnCall(t *testing.T) {
 
 	port := mustPort(t, srv.URL)
 	f := newTestFirewall(t, nil)
-	if err := f.SetConfig(true, false, "allow", nil, ProviderConfig{
+	if err := f.SetConfig(Config{Enabled: true, Default: "allow", Provider: ProviderConfig{
 		Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k",
 		TimeoutMs: 500, CacheTTLSec: 60,
-	}); err != nil {
+	}}); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
 
@@ -351,13 +417,131 @@ func TestAllowSkipsProviderForItsOwnCall(t *testing.T) {
 	}
 }
 
+// Every decision has to name itself. The reason goes straight into a log line,
+// and one trailing off after "reason:" is worse than no line at all.
+func TestReasonIsNeverEmpty(t *testing.T) {
+	check := func(t *testing.T, what, reason string) {
+		t.Helper()
+		if strings.TrimSpace(reason) == "" {
+			t.Fatalf("%s produced an empty reason", what)
+		}
+	}
+
+	// A rule written by hand may have no id, and "rule " names nothing.
+	f := newTestFirewall(t, []Rule{
+		{ID: "", Action: "deny", CIDR: "10.0.0.1", Port: "6000"},
+		{ID: "named", Action: "deny", CIDR: "10.0.0.2", Port: "6000"},
+	})
+	_, reason := f.Allow("10.0.0.1:1", 6000)
+	check(t, "rule without an id", reason)
+	if reason != "rule #1" {
+		t.Fatalf("reason = %q, want the rule's position", reason)
+	}
+	_, reason = f.Allow("10.0.0.2:1", 6000)
+	if reason != "rule named" {
+		t.Fatalf("reason = %q, want the rule's id", reason)
+	}
+
+	_, reason = f.Allow("10.0.0.3:1", 6000)
+	check(t, "the default policy", reason)
+
+	_, reason = f.AllowControl("10.0.0.3:1", 7000)
+	check(t, "an unprotected control port", reason)
+
+	if err := f.SetConfig(Config{Default: "allow", Provider: ProviderConfig{Mode: "off"}}); err != nil {
+		t.Fatal(err)
+	}
+	_, reason = f.Allow("10.0.0.1:1", 6000)
+	check(t, "a disabled firewall", reason)
+}
+
+// A provider that answers with nothing but blanks says nothing, and must not
+// leave an empty pair of brackets behind in the log.
+func TestBlankProviderReasonFallsBackToPlainReputation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("{\"results\":[{\"blacklisted\":true,\"reason\":\"  \\n\\t \"}]}"))
+	}))
+	t.Cleanup(srv.Close)
+
+	f := newTestFirewall(t, nil)
+	if err := f.SetConfig(Config{Enabled: true, Default: "allow", Provider: ProviderConfig{
+		Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	ok, reason := f.Allow("8.8.8.8:1234", 6000)
+	if ok {
+		t.Fatal("a blacklisted address should be rejected")
+	}
+	if reason != "reputation" {
+		t.Fatalf("reason = %q, want a plain \"reputation\"", reason)
+	}
+}
+
+// The provider can say why it blocked an IP, and that reaches the rejection so
+// the log says something more useful than "reputation".
+func TestProviderReasonReachesTheVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "reason given",
+			body: `{"results":[{"blacklisted":true,"reason":"botnet c2"}]}`,
+			want: "reputation (botnet c2)",
+		},
+		{
+			// The service may not answer with one, and it must not have to.
+			name: "no reason field",
+			body: `{"results":[{"blacklisted":true}]}`,
+			want: "reputation",
+		},
+		{
+			// The reason crosses the network from another service. A newline in
+			// it would let whoever runs that service write log lines of their
+			// own into ours.
+			name: "reason is not allowed to forge log lines",
+			body: `{"results":[{"blacklisted":true,"reason":"ok\n2026-01-01 [W] frps shutting down"}]}`,
+			want: "reputation (ok 2026-01-01 [W] frps shutting down)",
+		},
+		{
+			name: "over-long reason is cut",
+			body: `{"results":[{"blacklisted":true,"reason":"` + strings.Repeat("x", 500) + `"}]}`,
+			want: "reputation (" + strings.Repeat("x", 64) + ")",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(srv.Close)
+
+			f := newTestFirewall(t, nil)
+			if err := f.SetConfig(Config{Enabled: true, Default: "allow", Provider: ProviderConfig{
+				Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k",
+			}}); err != nil {
+				t.Fatalf("set config: %v", err)
+			}
+
+			ok, reason := f.Allow("8.8.8.8:1234", 6000)
+			if ok {
+				t.Fatal("a blacklisted address should be rejected")
+			}
+			if reason != tc.want {
+				t.Fatalf("reason = %q, want %q", reason, tc.want)
+			}
+		})
+	}
+}
+
 // A provider elsewhere must not be mistaken for us, or every port sharing its
 // number would quietly lose the reputation check.
 func TestSelfProviderNotSetForRemoteHost(t *testing.T) {
 	f := newTestFirewall(t, nil)
-	if err := f.SetConfig(true, false, "allow", nil, ProviderConfig{
+	if err := f.SetConfig(Config{Enabled: true, Default: "allow", Provider: ProviderConfig{
 		Mode: "frpcontrol", FRPControlURL: "https://example.invalid:7002", FRPControlAPIKey: "k",
-	}); err != nil {
+	}}); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
 	if f.selfProviderPort != 0 {
@@ -378,10 +562,10 @@ func TestCheckExternalCollapsesConcurrentQueries(t *testing.T) {
 	defer srv.Close()
 
 	f := newTestFirewall(t, nil)
-	if err := f.SetConfig(true, false, "allow", nil, ProviderConfig{
+	if err := f.SetConfig(Config{Enabled: true, Default: "allow", Provider: ProviderConfig{
 		Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k",
 		TimeoutMs: 5000, CacheTTLSec: 60,
-	}); err != nil {
+	}}); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
 
@@ -390,7 +574,7 @@ func TestCheckExternalCollapsesConcurrentQueries(t *testing.T) {
 	blocked := make([]bool, n)
 	for i := range n {
 		wg.Go(func() {
-			blocked[i] = f.checkExternal("8.8.8.8", f.provider.effective(), f.client)
+			blocked[i], _ = f.checkExternal("8.8.8.8", f.provider.effective(), f.client)
 		})
 	}
 	time.Sleep(200 * time.Millisecond) // let them all pile onto the same IP
