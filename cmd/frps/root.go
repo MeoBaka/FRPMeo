@@ -27,7 +27,6 @@ import (
 	"github.com/fatedier/frp/pkg/config/v1/validation"
 	"github.com/fatedier/frp/pkg/policy/security"
 	"github.com/fatedier/frp/pkg/util/log"
-	svcpkg "github.com/fatedier/frp/pkg/util/service"
 	"github.com/fatedier/frp/pkg/util/version"
 	"github.com/fatedier/frp/server"
 )
@@ -123,11 +122,6 @@ func runServer(cfg *v1.ServerConfig) (err error) {
 		return err
 	}
 	log.Infof("frps started successfully")
-
-	// Under a service manager, hand the run loop to it: on Windows the SCM has
-	// to be answered or it kills the process, and on either platform this is
-	// what lets a stop request shut frps down cleanly.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	return svcpkg.Run("frps", func() { svr.Run(ctx) }, cancel)
+	svr.Run(context.Background())
+	return
 }
