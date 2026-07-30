@@ -1,15 +1,27 @@
 // Copyright 2019 fatedier, fatedier@gmail.com
+
 //
+
 // Licensed under the Apache License, Version 2.0 (the "License");
+
 // you may not use this file except in compliance with the License.
+
 // You may obtain a copy of the License at
+
 //
+
 //     http://www.apache.org/licenses/LICENSE-2.0
+
 //
+
 // Unless required by applicable law or agreed to in writing, software
+
 // distributed under the License is distributed on an "AS IS" BASIS,
+
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
 // See the License for the specific language governing permissions and
+
 // limitations under the License.
 
 package proxy
@@ -36,39 +48,53 @@ import (
 
 func init() {
 	RegisterProxyFactory(reflect.TypeFor[*v1.UDPProxyConfig](), NewUDPProxy)
+
 	// The "pe" (Bedrock) proxy is a plain UDP relay on the server side; its
+
 	// Bedrock host-routing lives entirely on frpc, so reuse this implementation.
+
 	RegisterProxyFactory(reflect.TypeFor[*v1.PEProxyConfig](), NewUDPProxy)
 }
 
 // udpProxyConfigurer is any proxy config the server exposes as a public UDP
+
 // port (UDPProxyConfig and PEProxyConfig).
+
 type udpProxyConfigurer interface {
 	v1.ProxyConfigurer
+
 	GetRemotePort() int
+
 	SetRemotePort(int)
 }
 
 type UDPProxy struct {
 	*BaseProxy
+
 	cfg udpProxyConfigurer
 
 	realBindPort int
 
 	// udpConn is the listener of udp packages
+
 	udpConn *net.UDPConn
 
 	// there are always only one workConn at the same time
+
 	// get another one if it closed
+
 	workConn net.Conn
 
 	// sendCh is used for sending packages to workConn
+
 	sendCh chan *msg.UDPPacket
 
 	// readCh is used for reading packages from workConn
+
 	readCh chan *msg.UDPPacket
 
 	// checkCloseCh is used for watching if workConn is closed
+
 	checkCloseCh chan int
 
 	isClosed bool
@@ -76,22 +102,28 @@ type UDPProxy struct {
 
 func NewUDPProxy(baseProxy *BaseProxy) Proxy {
 	unwrapped, ok := baseProxy.GetConfigurer().(udpProxyConfigurer)
+
 	if !ok {
 		return nil
 	}
+
 	baseProxy.usedPortsNum = 1
+
 	return &UDPProxy{
 		BaseProxy: baseProxy,
-		cfg:       unwrapped,
+
+		cfg: unwrapped,
 	}
 }
 
 func (pxy *UDPProxy) Run() (remoteAddr string, err error) {
 	xl := pxy.xl
+
 	pxy.realBindPort, err = pxy.rc.UDPPortManager.Acquire(pxy.name, pxy.cfg.GetRemotePort())
 	if err != nil {
 		return "", fmt.Errorf("acquire port %d error: %v", pxy.cfg.GetRemotePort(), err)
 	}
+
 	defer func() {
 		if err != nil {
 			pxy.rc.UDPPortManager.Release(pxy.realBindPort)
@@ -99,130 +131,222 @@ func (pxy *UDPProxy) Run() (remoteAddr string, err error) {
 	}()
 
 	remoteAddr = fmt.Sprintf(":%d", pxy.realBindPort)
+
 	pxy.cfg.SetRemotePort(pxy.realBindPort)
+
 	addr, errRet := net.ResolveUDPAddr("udp", net.JoinHostPort(pxy.serverCfg.ProxyBindAddr, strconv.Itoa(pxy.realBindPort)))
+
 	if errRet != nil {
+
 		err = errRet
+
 		return
+
 	}
+
 	udpConn, errRet := net.ListenUDP("udp", addr)
+
 	if errRet != nil {
+
 		err = errRet
+
 		xl.Warnf("listen udp port error: %v", err)
+
 		return
+
 	}
+
 	xl.Infof("udp proxy listen port [%d]", pxy.cfg.GetRemotePort())
 
 	pxy.udpConn = udpConn
+
 	pxy.sendCh = make(chan *msg.UDPPacket, 1024)
+
 	pxy.readCh = make(chan *msg.UDPPacket, 1024)
+
 	pxy.checkCloseCh = make(chan int)
 
 	// read message from workConn, if it returns any error, notify proxy to start a new workConn
+
 	workConnReaderFn := func(payloadConn *msg.Conn) {
 		for {
+
 			var (
 				rawMsg msg.Message
+
 				errRet error
 			)
+
 			xl.Tracef("loop waiting message from udp workConn")
+
 			// client will send heartbeat in workConn for keeping alive
+
 			_ = payloadConn.SetReadDeadline(time.Now().Add(time.Duration(60) * time.Second))
+
 			if rawMsg, errRet = payloadConn.ReadMsg(); errRet != nil {
+
 				xl.Warnf("read from workConn for udp error: %v", errRet)
+
 				_ = payloadConn.Close()
+
 				// notify proxy to start a new work connection
+
 				// ignore error here, it means the proxy is closed
+
 				_ = errors.PanicToError(func() {
 					pxy.checkCloseCh <- 1
 				})
+
 				return
+
 			}
+
 			if err := payloadConn.SetReadDeadline(time.Time{}); err != nil {
 				xl.Warnf("set read deadline error: %v", err)
 			}
+
 			switch m := rawMsg.(type) {
+
 			case *msg.Ping:
+
 				xl.Tracef("udp work conn get ping message")
+
 				continue
+
 			case *msg.UDPPacket:
+
 				if errRet := errors.PanicToError(func() {
 					xl.Tracef("get udp message from workConn, len: %d", len(m.Content))
+
 					pxy.readCh <- m
+
 					metrics.Server.AddTrafficOut(
+
 						pxy.GetName(),
+
 						pxy.GetConfigurer().GetBaseConfig().Type,
+
 						int64(len(m.Content)),
 					)
 				}); errRet != nil {
+
 					_ = payloadConn.Close()
+
 					xl.Infof("reader goroutine for udp work connection closed")
+
 					return
+
 				}
+
 			}
+
 		}
 	}
 
 	// send message to workConn
+
 	workConnSenderFn := func(payloadConn *msg.Conn, ctx context.Context) {
 		var errRet error
+
 		for {
 			select {
+
 			case udpMsg, ok := <-pxy.sendCh:
+
 				if !ok {
+
 					xl.Infof("sender goroutine for udp work connection closed")
+
 					return
+
 				}
+
 				if errRet = payloadConn.WriteMsg(udpMsg); errRet != nil {
+
 					xl.Infof("sender goroutine for udp work connection closed: %v", errRet)
+
 					_ = payloadConn.Close()
+
 					return
+
 				}
+
 				xl.Tracef("send message to udp workConn, len: %d", len(udpMsg.Content))
+
 				metrics.Server.AddTrafficIn(
+
 					pxy.GetName(),
+
 					pxy.GetConfigurer().GetBaseConfig().Type,
+
 					int64(len(udpMsg.Content)),
 				)
+
 				continue
+
 			case <-ctx.Done():
+
 				xl.Infof("sender goroutine for udp work connection closed")
+
 				return
+
 			}
 		}
 	}
 
 	go func() {
 		// Sleep a while for waiting control send the NewProxyResp to client.
+
 		time.Sleep(500 * time.Millisecond)
+
 		for {
+
 			workConn, err := pxy.GetWorkConnFromPool(nil, nil)
 			if err != nil {
+
 				time.Sleep(1 * time.Second)
+
 				// check if proxy is closed
+
 				select {
+
 				case _, ok := <-pxy.checkCloseCh:
+
 					if !ok {
 						return
 					}
+
 				default:
+
 				}
+
 				continue
+
 			}
+
 			// close the old workConn and replace it with a new one
+
 			if pxy.workConn != nil {
 				pxy.workConn.Close()
 			}
 
 			var rwc io.ReadWriteCloser = workConn
+
 			if pxy.GetConfigurer().GetBaseConfig().Transport.UseEncryption {
+
 				rwc, err = libio.WithEncryption(rwc, pxy.encryptionKey)
 				if err != nil {
+
 					xl.Errorf("create encryption stream error: %v", err)
+
 					workConn.Close()
+
 					continue
+
 				}
+
 			}
+
 			if pxy.GetConfigurer().GetBaseConfig().Transport.UseCompression {
 				rwc = libio.WithCompression(rwc)
 			}
@@ -234,55 +358,87 @@ func (pxy *UDPProxy) Run() (remoteAddr string, err error) {
 			}
 
 			pxy.workConn = netpkg.WrapReadWriteCloserToConn(rwc, workConn)
+
 			// Plain UDP payload follows the negotiated wire protocol for message framing.
+
 			payloadConn := msg.NewConn(pxy.workConn, msg.NewReadWriter(pxy.workConn, pxy.wireProtocol))
+
 			ctx, cancel := context.WithCancel(context.Background())
+
 			go workConnReaderFn(payloadConn)
+
 			go workConnSenderFn(payloadConn, ctx)
+
 			_, ok := <-pxy.checkCloseCh
+
 			cancel()
+
 			if !ok {
 				return
 			}
+
 		}
 	}()
 
 	// Read from user connections and send wrapped udp message to sendCh (forwarded by workConn).
+
 	// Client will transfor udp message to local udp service and waiting for response for a while.
+
 	// Response will be wrapped to be forwarded by work connection to server.
+
 	// Close readCh and sendCh at the end.
+
 	// Count distinct UDP source addresses as "connections" (UDP is
+
 	// connectionless, so without this the dashboard would always show 0).
+
 	name := pxy.GetName()
+
 	proxyType := pxy.GetConfigurer().GetBaseConfig().Type
+
 	tracker := &udp.SessionTracker{
-		OnOpen:      func(string) { metrics.Server.OpenConnection(name, proxyType) },
-		OnClose:     func(string) { metrics.Server.CloseConnection(name, proxyType) },
+		OnOpen: func(string) { metrics.Server.OpenConnection(name, proxyType) },
+
+		OnClose: func(string) { metrics.Server.CloseConnection(name, proxyType) },
+
 		IdleTimeout: time.Duration(pxy.serverCfg.UDPSessionTimeout) * time.Second,
 	}
+
 	go func() {
 		udp.ForwardUserConn(udpConn, pxy.readCh, pxy.sendCh, int(pxy.serverCfg.UDPPacketSize), tracker, pxy.newUDPAdmitFilter(pxy.realBindPort))
+
 		pxy.Close()
 	}()
+
 	return remoteAddr, nil
 }
 
 func (pxy *UDPProxy) Close() {
 	pxy.mu.Lock()
+
 	defer pxy.mu.Unlock()
+
 	if !pxy.isClosed {
+
 		pxy.isClosed = true
 
 		pxy.BaseProxy.Close()
+
 		if pxy.workConn != nil {
 			pxy.workConn.Close()
 		}
+
 		pxy.udpConn.Close()
 
 		// all channels only closed here
+
 		close(pxy.checkCloseCh)
+
 		close(pxy.readCh)
+
 		close(pxy.sendCh)
+
 	}
+
 	pxy.rc.UDPPortManager.Release(pxy.realBindPort)
 }

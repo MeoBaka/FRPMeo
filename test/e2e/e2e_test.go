@@ -10,6 +10,7 @@ import (
 
 	"github.com/fatedier/frp/pkg/util/log"
 	// test source
+
 	"github.com/fatedier/frp/test/e2e/framework"
 	_ "github.com/fatedier/frp/test/e2e/legacy/basic"
 	_ "github.com/fatedier/frp/test/e2e/legacy/features"
@@ -20,21 +21,28 @@ import (
 )
 
 // handleFlags sets up all flags and parses the command line.
+
 func handleFlags() {
 	framework.RegisterCommonFlags(flag.CommandLine)
+
 	flag.Parse()
 }
 
 func TestMain(m *testing.M) {
 	// Register test flags, then parse flags.
+
 	handleFlags()
 
 	if err := framework.ValidateTestContext(&framework.TestContext); err != nil {
+
 		fmt.Println(err)
+
 		os.Exit(1)
+
 	}
 
 	log.InitLogger("console", framework.TestContext.LogLevel, 0, true)
+
 	os.Exit(m.Run())
 }
 

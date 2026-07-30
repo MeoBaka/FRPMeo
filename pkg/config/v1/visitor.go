@@ -1,15 +1,27 @@
 // Copyright 2023 The frp Authors
+
 //
+
 // Licensed under the Apache License, Version 2.0 (the "License");
+
 // you may not use this file except in compliance with the License.
+
 // You may obtain a copy of the License at
+
 //
+
 //     http://www.apache.org/licenses/LICENSE-2.0
+
 //
+
 // Unless required by applicable law or agreed to in writing, software
+
 // distributed under the License is distributed on an "AS IS" BASIS,
+
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
 // See the License for the specific language governing permissions and
+
 // limitations under the License.
 
 package v1
@@ -22,35 +34,54 @@ import (
 )
 
 type VisitorTransport struct {
-	UseEncryption  bool `json:"useEncryption,omitempty"`
+	UseEncryption bool `json:"useEncryption,omitempty"`
+
 	UseCompression bool `json:"useCompression,omitempty"`
 }
 
 type VisitorBaseConfig struct {
 	Name string `json:"name"`
+
 	Type string `json:"type"`
+
 	// Enabled controls whether this visitor is enabled. nil or true means enabled, false means disabled.
+
 	// This allows individual control over each visitor, complementing the global "start" field.
-	Enabled   *bool            `json:"enabled,omitempty"`
+
+	Enabled *bool `json:"enabled,omitempty"`
+
 	Transport VisitorTransport `json:"transport,omitempty"`
-	SecretKey string           `json:"secretKey,omitempty"`
+
+	SecretKey string `json:"secretKey,omitempty"`
+
 	// if the server user is not set, it defaults to the current user
+
 	ServerUser string `json:"serverUser,omitempty"`
+
 	ServerName string `json:"serverName,omitempty"`
-	BindAddr   string `json:"bindAddr,omitempty"`
+
+	BindAddr string `json:"bindAddr,omitempty"`
+
 	// BindPort is the port that visitor listens on.
+
 	// It can be less than 0, it means don't bind to the port and only receive connections redirected from
+
 	// other visitors. (This is not supported for SUDP now)
+
 	BindPort int `json:"bindPort,omitempty"`
 
 	// Plugin specifies what plugin should be used.
+
 	Plugin TypedVisitorPluginOptions `json:"plugin,omitempty"`
 }
 
 func (c VisitorBaseConfig) Clone() VisitorBaseConfig {
 	out := c
+
 	out.Enabled = util.ClonePtr(c.Enabled)
+
 	out.Plugin = c.Plugin.Clone()
+
 	return out
 }
 
@@ -66,32 +97,45 @@ func (c *VisitorBaseConfig) Complete() {
 
 type VisitorConfigurer interface {
 	Complete()
+
 	GetBaseConfig() *VisitorBaseConfig
+
 	Clone() VisitorConfigurer
 }
 
 type VisitorType string
 
 const (
-	VisitorTypeSTCP     VisitorType = "stcp"
-	VisitorTypeXTCP     VisitorType = "xtcp"
-	VisitorTypeSUDP     VisitorType = "sudp"
-	VisitorTypeXUDP     VisitorType = "xudp"
+	VisitorTypeSTCP VisitorType = "stcp"
+
+	VisitorTypeXTCP VisitorType = "xtcp"
+
+	VisitorTypeSUDP VisitorType = "sudp"
+
+	VisitorTypeXUDP VisitorType = "xudp"
+
 	VisitorTypeSTCPSUDP VisitorType = "stcp+sudp"
+
 	VisitorTypeXTCPXUDP VisitorType = "xtcp+xudp"
 )
 
 var visitorConfigTypeMap = map[VisitorType]reflect.Type{
-	VisitorTypeSTCP:     reflect.TypeFor[STCPVisitorConfig](),
-	VisitorTypeXTCP:     reflect.TypeFor[XTCPVisitorConfig](),
-	VisitorTypeSUDP:     reflect.TypeFor[SUDPVisitorConfig](),
-	VisitorTypeXUDP:     reflect.TypeFor[XUDPVisitorConfig](),
+	VisitorTypeSTCP: reflect.TypeFor[STCPVisitorConfig](),
+
+	VisitorTypeXTCP: reflect.TypeFor[XTCPVisitorConfig](),
+
+	VisitorTypeSUDP: reflect.TypeFor[SUDPVisitorConfig](),
+
+	VisitorTypeXUDP: reflect.TypeFor[XUDPVisitorConfig](),
+
 	VisitorTypeSTCPSUDP: reflect.TypeFor[STCPSUDPVisitorConfig](),
+
 	VisitorTypeXTCPXUDP: reflect.TypeFor[XTCPXUDPVisitorConfig](),
 }
 
 type TypedVisitorConfig struct {
 	Type string `json:"type"`
+
 	VisitorConfigurer
 }
 
@@ -102,7 +146,9 @@ func (c *TypedVisitorConfig) UnmarshalJSON(b []byte) error {
 	}
 
 	c.Type = configurer.GetBaseConfig().Type
+
 	c.VisitorConfigurer = configurer
+
 	return nil
 }
 
@@ -112,11 +158,15 @@ func (c *TypedVisitorConfig) MarshalJSON() ([]byte, error) {
 
 func NewVisitorConfigurerByType(t VisitorType) VisitorConfigurer {
 	v, ok := visitorConfigTypeMap[t]
+
 	if !ok {
 		return nil
 	}
+
 	vc := reflect.New(v).Interface().(VisitorConfigurer)
+
 	vc.GetBaseConfig().Type = string(t)
+
 	return vc
 }
 
@@ -128,7 +178,9 @@ type STCPVisitorConfig struct {
 
 func (c *STCPVisitorConfig) Clone() VisitorConfigurer {
 	out := *c
+
 	out.VisitorBaseConfig = c.VisitorBaseConfig.Clone()
+
 	return &out
 }
 
@@ -140,24 +192,33 @@ type SUDPVisitorConfig struct {
 
 func (c *SUDPVisitorConfig) Clone() VisitorConfigurer {
 	out := *c
+
 	out.VisitorBaseConfig = c.VisitorBaseConfig.Clone()
+
 	return &out
 }
 
 var _ VisitorConfigurer = &STCPSUDPVisitorConfig{}
 
 // STCPSUDPVisitorConfig is the visitor side of the merged secret proxy. It binds
+
 // BOTH a local TCP listener and a local UDP listener on BindAddr:BindPort and
+
 // reaches the provider through the frps relay, tagging each relayed stream so the
+
 // provider routes it to the TCP or UDP local service. It carries no extra fields
+
 // beyond the base (relay-based, so no NAT-traversal knobs like xtcp+xudp).
+
 type STCPSUDPVisitorConfig struct {
 	VisitorBaseConfig
 }
 
 func (c *STCPSUDPVisitorConfig) Clone() VisitorConfigurer {
 	out := *c
+
 	out.VisitorBaseConfig = c.VisitorBaseConfig.Clone()
+
 	return &out
 }
 
@@ -166,14 +227,20 @@ var _ VisitorConfigurer = &XTCPVisitorConfig{}
 type XTCPVisitorConfig struct {
 	VisitorBaseConfig
 
-	Protocol          string `json:"protocol,omitempty"`
-	KeepTunnelOpen    bool   `json:"keepTunnelOpen,omitempty"`
-	MaxRetriesAnHour  int    `json:"maxRetriesAnHour,omitempty"`
-	MinRetryInterval  int    `json:"minRetryInterval,omitempty"`
-	FallbackTo        string `json:"fallbackTo,omitempty"`
-	FallbackTimeoutMs int    `json:"fallbackTimeoutMs,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
+
+	KeepTunnelOpen bool `json:"keepTunnelOpen,omitempty"`
+
+	MaxRetriesAnHour int `json:"maxRetriesAnHour,omitempty"`
+
+	MinRetryInterval int `json:"minRetryInterval,omitempty"`
+
+	FallbackTo string `json:"fallbackTo,omitempty"`
+
+	FallbackTimeoutMs int `json:"fallbackTimeoutMs,omitempty"`
 
 	// NatTraversal configuration for NAT traversal
+
 	NatTraversal *NatTraversalConfig `json:"natTraversal,omitempty"`
 }
 
@@ -181,35 +248,51 @@ func (c *XTCPVisitorConfig) Complete() {
 	c.VisitorBaseConfig.Complete()
 
 	c.Protocol = util.EmptyOr(c.Protocol, "quic")
+
 	c.MaxRetriesAnHour = util.EmptyOr(c.MaxRetriesAnHour, 8)
+
 	c.MinRetryInterval = util.EmptyOr(c.MinRetryInterval, 90)
+
 	c.FallbackTimeoutMs = util.EmptyOr(c.FallbackTimeoutMs, 1000)
 }
 
 func (c *XTCPVisitorConfig) Clone() VisitorConfigurer {
 	out := *c
+
 	out.VisitorBaseConfig = c.VisitorBaseConfig.Clone()
+
 	out.NatTraversal = c.NatTraversal.Clone()
+
 	return &out
 }
 
 var _ VisitorConfigurer = &XUDPVisitorConfig{}
 
 // XUDPVisitorConfig is the visitor side of a UDP proxy reached via NAT hole
+
 // punching (the UDP counterpart of XTCPVisitorConfig). Note: unlike XTCP there
+
 // is no FallbackTo — relay fallback is meaningless for datagram UDP.
+
 type XUDPVisitorConfig struct {
 	VisitorBaseConfig
 
 	// Protocol selects the reliable tunnel transport layered on the punched
+
 	// UDP hole ("quic" or "kcp"). It does NOT refer to the carried payload,
+
 	// which is always UDP.
-	Protocol         string `json:"protocol,omitempty"`
-	KeepTunnelOpen   bool   `json:"keepTunnelOpen,omitempty"`
-	MaxRetriesAnHour int    `json:"maxRetriesAnHour,omitempty"`
-	MinRetryInterval int    `json:"minRetryInterval,omitempty"`
+
+	Protocol string `json:"protocol,omitempty"`
+
+	KeepTunnelOpen bool `json:"keepTunnelOpen,omitempty"`
+
+	MaxRetriesAnHour int `json:"maxRetriesAnHour,omitempty"`
+
+	MinRetryInterval int `json:"minRetryInterval,omitempty"`
 
 	// NatTraversal configuration for NAT traversal
+
 	NatTraversal *NatTraversalConfig `json:"natTraversal,omitempty"`
 }
 
@@ -217,40 +300,59 @@ func (c *XUDPVisitorConfig) Complete() {
 	c.VisitorBaseConfig.Complete()
 
 	c.Protocol = util.EmptyOr(c.Protocol, "quic")
+
 	c.MaxRetriesAnHour = util.EmptyOr(c.MaxRetriesAnHour, 8)
+
 	c.MinRetryInterval = util.EmptyOr(c.MinRetryInterval, 90)
 }
 
 func (c *XUDPVisitorConfig) Clone() VisitorConfigurer {
 	out := *c
+
 	out.VisitorBaseConfig = c.VisitorBaseConfig.Clone()
+
 	out.NatTraversal = c.NatTraversal.Clone()
+
 	return &out
 }
 
 var _ VisitorConfigurer = &XTCPXUDPVisitorConfig{}
 
 // XTCPXUDPVisitorConfig is the visitor side of the combined proxy. It binds BOTH
+
 // a local TCP listener and a local UDP listener on BindAddr:BindPort and carries
+
 // both over a single hole-punched tunnel using tagged streams.
+
 type XTCPXUDPVisitorConfig struct {
 	VisitorBaseConfig
 
 	// Protocol selects the reliable tunnel transport over the punched UDP hole
+
 	// ("quic" or "kcp"). Both TCP and UDP payloads ride this same session.
-	Protocol         string `json:"protocol,omitempty"`
-	KeepTunnelOpen   bool   `json:"keepTunnelOpen,omitempty"`
-	MaxRetriesAnHour int    `json:"maxRetriesAnHour,omitempty"`
-	MinRetryInterval int    `json:"minRetryInterval,omitempty"`
+
+	Protocol string `json:"protocol,omitempty"`
+
+	KeepTunnelOpen bool `json:"keepTunnelOpen,omitempty"`
+
+	MaxRetriesAnHour int `json:"maxRetriesAnHour,omitempty"`
+
+	MinRetryInterval int `json:"minRetryInterval,omitempty"`
 
 	// FallbackTimeoutMs is how long to wait for the P2P hole-punched tunnel
+
 	// before automatically falling back to the frps relay (stcp+sudp style) for
+
 	// that TCP connection / UDP session. Built-in and always on — no separate
+
 	// fallback visitor is needed because this visitor already owns the local
+
 	// port and the provider always registers a relay listener. Defaults to 1000.
+
 	FallbackTimeoutMs int `json:"fallbackTimeoutMs,omitempty"`
 
 	// NatTraversal configuration for NAT traversal
+
 	NatTraversal *NatTraversalConfig `json:"natTraversal,omitempty"`
 }
 
@@ -258,14 +360,20 @@ func (c *XTCPXUDPVisitorConfig) Complete() {
 	c.VisitorBaseConfig.Complete()
 
 	c.Protocol = util.EmptyOr(c.Protocol, "quic")
+
 	c.MaxRetriesAnHour = util.EmptyOr(c.MaxRetriesAnHour, 8)
+
 	c.MinRetryInterval = util.EmptyOr(c.MinRetryInterval, 90)
+
 	c.FallbackTimeoutMs = util.EmptyOr(c.FallbackTimeoutMs, 1000)
 }
 
 func (c *XTCPXUDPVisitorConfig) Clone() VisitorConfigurer {
 	out := *c
+
 	out.VisitorBaseConfig = c.VisitorBaseConfig.Clone()
+
 	out.NatTraversal = c.NatTraversal.Clone()
+
 	return &out
 }

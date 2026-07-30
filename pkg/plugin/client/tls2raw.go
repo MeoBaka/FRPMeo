@@ -1,15 +1,27 @@
 // Copyright 2024 The frp Authors
+
 //
+
 // Licensed under the Apache License, Version 2.0 (the "License");
+
 // you may not use this file except in compliance with the License.
+
 // You may obtain a copy of the License at
+
 //
+
 //     http://www.apache.org/licenses/LICENSE-2.0
+
 //
+
 // Unless required by applicable law or agreed to in writing, software
+
 // distributed under the License is distributed on an "AS IS" BASIS,
+
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
 // See the License for the specific language governing permissions and
+
 // limitations under the License.
 
 //go:build !frps
@@ -50,7 +62,9 @@ func NewTLS2RawPlugin(_ PluginContext, options v1.ClientPluginOptions) (Plugin, 
 	if err != nil {
 		return nil, err
 	}
+
 	p.tlsConfig = tlsConfig
+
 	return p, nil
 }
 
@@ -58,26 +72,41 @@ func (p *TLS2RawPlugin) Handle(ctx context.Context, connInfo *ConnectionInfo) {
 	xl := xlog.FromContextSafe(ctx)
 
 	wrapConn := netpkg.WrapReadWriteCloserToConn(connInfo.Conn, connInfo.UnderlyingConn)
+
 	tlsConn := tls.Server(wrapConn, p.tlsConfig)
 
 	if err := tlsConn.Handshake(); err != nil {
+
 		xl.Warnf("tls handshake error: %v", err)
+
 		tlsConn.Close()
+
 		return
+
 	}
+
 	rawConn, err := net.Dial("tcp", p.opts.LocalAddr)
 	if err != nil {
+
 		xl.Warnf("dial to local addr error: %v", err)
+
 		tlsConn.Close()
+
 		return
+
 	}
 
 	if connInfo.ProxyProtocolHeader != nil {
 		if _, err := connInfo.ProxyProtocolHeader.WriteTo(rawConn); err != nil {
+
 			xl.Warnf("tls2raw write proxy protocol header to local conn error: %v", err)
+
 			rawConn.Close()
+
 			tlsConn.Close()
+
 			return
+
 		}
 	}
 

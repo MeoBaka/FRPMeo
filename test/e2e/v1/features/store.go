@@ -19,29 +19,43 @@ var _ = ginkgo.Describe("[Feature: Store]", func() {
 	ginkgo.Describe("Store API", func() {
 		ginkgo.It("create proxy via API and verify connection", func() {
 			adminPort := f.AllocPort()
+
 			remotePort := f.AllocPort()
 
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+
 			webServer.addr = "127.0.0.1"
+
 			webServer.port = %d
 
+
+
 			[store]
+
 			path = "%s/store.json"
+
 			`, adminPort, f.TempDirectory)
 
 			f.RunProcesses(serverConf, []string{clientConf})
+
 			framework.ExpectNoError(framework.WaitForTCPReady(fmt.Sprintf("127.0.0.1:%d", adminPort), 5*time.Second))
 
 			proxyConfig := map[string]any{
 				"name": "test-tcp",
+
 				"type": "tcp",
+
 				"tcp": map[string]any{
-					"localIP":    "127.0.0.1",
-					"localPort":  f.PortByName(framework.TCPEchoServerPort),
+					"localIP": "127.0.0.1",
+
+					"localPort": f.PortByName(framework.TCPEchoServerPort),
+
 					"remotePort": remotePort,
 				},
 			}
+
 			proxyBody, _ := json.Marshal(proxyConfig)
 
 			framework.NewRequestExpect(f).RequestModify(func(r *request.Request) {
@@ -59,30 +73,45 @@ var _ = ginkgo.Describe("[Feature: Store]", func() {
 
 		ginkgo.It("update proxy via API", func() {
 			adminPort := f.AllocPort()
+
 			remotePort1 := f.AllocPort()
+
 			remotePort2 := f.AllocPort()
 
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+
 			webServer.addr = "127.0.0.1"
+
 			webServer.port = %d
 
+
+
 			[store]
+
 			path = "%s/store.json"
+
 			`, adminPort, f.TempDirectory)
 
 			f.RunProcesses(serverConf, []string{clientConf})
+
 			framework.ExpectNoError(framework.WaitForTCPReady(fmt.Sprintf("127.0.0.1:%d", adminPort), 5*time.Second))
 
 			proxyConfig := map[string]any{
 				"name": "test-tcp",
+
 				"type": "tcp",
+
 				"tcp": map[string]any{
-					"localIP":    "127.0.0.1",
-					"localPort":  f.PortByName(framework.TCPEchoServerPort),
+					"localIP": "127.0.0.1",
+
+					"localPort": f.PortByName(framework.TCPEchoServerPort),
+
 					"remotePort": remotePort1,
 				},
 			}
+
 			proxyBody, _ := json.Marshal(proxyConfig)
 
 			framework.NewRequestExpect(f).RequestModify(func(r *request.Request) {
@@ -94,9 +123,11 @@ var _ = ginkgo.Describe("[Feature: Store]", func() {
 			})
 
 			framework.ExpectNoError(framework.WaitForTCPReady(fmt.Sprintf("127.0.0.1:%d", remotePort1), 5*time.Second))
+
 			framework.NewRequestExpect(f).Port(remotePort1).Ensure()
 
 			proxyConfig["tcp"].(map[string]any)["remotePort"] = remotePort2
+
 			proxyBody, _ = json.Marshal(proxyConfig)
 
 			framework.NewRequestExpect(f).RequestModify(func(r *request.Request) {
@@ -108,36 +139,53 @@ var _ = ginkgo.Describe("[Feature: Store]", func() {
 			})
 
 			framework.ExpectNoError(framework.WaitForTCPReady(fmt.Sprintf("127.0.0.1:%d", remotePort2), 5*time.Second))
+
 			framework.ExpectNoError(framework.WaitForTCPUnreachable(fmt.Sprintf("127.0.0.1:%d", remotePort1), 100*time.Millisecond, 5*time.Second))
+
 			framework.NewRequestExpect(f).Port(remotePort2).Ensure()
+
 			framework.NewRequestExpect(f).Port(remotePort1).ExpectError(true).Ensure()
 		})
 
 		ginkgo.It("delete proxy via API", func() {
 			adminPort := f.AllocPort()
+
 			remotePort := f.AllocPort()
 
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+
 			webServer.addr = "127.0.0.1"
+
 			webServer.port = %d
 
+
+
 			[store]
+
 			path = "%s/store.json"
+
 			`, adminPort, f.TempDirectory)
 
 			f.RunProcesses(serverConf, []string{clientConf})
+
 			framework.ExpectNoError(framework.WaitForTCPReady(fmt.Sprintf("127.0.0.1:%d", adminPort), 5*time.Second))
 
 			proxyConfig := map[string]any{
 				"name": "test-tcp",
+
 				"type": "tcp",
+
 				"tcp": map[string]any{
-					"localIP":    "127.0.0.1",
-					"localPort":  f.PortByName(framework.TCPEchoServerPort),
+					"localIP": "127.0.0.1",
+
+					"localPort": f.PortByName(framework.TCPEchoServerPort),
+
 					"remotePort": remotePort,
 				},
 			}
+
 			proxyBody, _ := json.Marshal(proxyConfig)
 
 			framework.NewRequestExpect(f).RequestModify(func(r *request.Request) {
@@ -149,6 +197,7 @@ var _ = ginkgo.Describe("[Feature: Store]", func() {
 			})
 
 			framework.ExpectNoError(framework.WaitForTCPReady(fmt.Sprintf("127.0.0.1:%d", remotePort), 5*time.Second))
+
 			framework.NewRequestExpect(f).Port(remotePort).Ensure()
 
 			framework.NewRequestExpect(f).RequestModify(func(r *request.Request) {
@@ -158,34 +207,49 @@ var _ = ginkgo.Describe("[Feature: Store]", func() {
 			})
 
 			framework.ExpectNoError(framework.WaitForTCPUnreachable(fmt.Sprintf("127.0.0.1:%d", remotePort), 100*time.Millisecond, 5*time.Second))
+
 			framework.NewRequestExpect(f).Port(remotePort).ExpectError(true).Ensure()
 		})
 
 		ginkgo.It("list and get proxy via API", func() {
 			adminPort := f.AllocPort()
+
 			remotePort := f.AllocPort()
 
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+
 			webServer.addr = "127.0.0.1"
+
 			webServer.port = %d
 
+
+
 			[store]
+
 			path = "%s/store.json"
+
 			`, adminPort, f.TempDirectory)
 
 			f.RunProcesses(serverConf, []string{clientConf})
+
 			framework.ExpectNoError(framework.WaitForTCPReady(fmt.Sprintf("127.0.0.1:%d", adminPort), 5*time.Second))
 
 			proxyConfig := map[string]any{
 				"name": "test-tcp",
+
 				"type": "tcp",
+
 				"tcp": map[string]any{
-					"localIP":    "127.0.0.1",
-					"localPort":  f.PortByName(framework.TCPEchoServerPort),
+					"localIP": "127.0.0.1",
+
+					"localPort": f.PortByName(framework.TCPEchoServerPort),
+
 					"remotePort": remotePort,
 				},
 			}
+
 			proxyBody, _ := json.Marshal(proxyConfig)
 
 			framework.NewRequestExpect(f).RequestModify(func(r *request.Request) {
@@ -219,12 +283,17 @@ var _ = ginkgo.Describe("[Feature: Store]", func() {
 			adminPort := f.AllocPort()
 
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+
 			webServer.addr = "127.0.0.1"
+
 			webServer.port = %d
+
 			`, adminPort)
 
 			f.RunProcesses(serverConf, []string{clientConf})
+
 			framework.ExpectNoError(framework.WaitForTCPReady(fmt.Sprintf("127.0.0.1:%d", adminPort), 5*time.Second))
 
 			framework.NewRequestExpect(f).RequestModify(func(r *request.Request) {
@@ -238,20 +307,30 @@ var _ = ginkgo.Describe("[Feature: Store]", func() {
 			adminPort := f.AllocPort()
 
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+
 			webServer.addr = "127.0.0.1"
+
 			webServer.port = %d
 
+
+
 			[store]
+
 			path = "%s/store.json"
+
 			`, adminPort, f.TempDirectory)
 
 			f.RunProcesses(serverConf, []string{clientConf})
+
 			framework.ExpectNoError(framework.WaitForTCPReady(fmt.Sprintf("127.0.0.1:%d", adminPort), 5*time.Second))
 
 			invalidBody, _ := json.Marshal(map[string]any{
 				"name": "bad-proxy",
+
 				"type": "tcp",
+
 				"udp": map[string]any{
 					"localPort": 1234,
 				},
@@ -268,26 +347,39 @@ var _ = ginkgo.Describe("[Feature: Store]", func() {
 
 		ginkgo.It("rejects path/body name mismatch on update", func() {
 			adminPort := f.AllocPort()
+
 			remotePort := f.AllocPort()
 
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+
 			webServer.addr = "127.0.0.1"
+
 			webServer.port = %d
 
+
+
 			[store]
+
 			path = "%s/store.json"
+
 			`, adminPort, f.TempDirectory)
 
 			f.RunProcesses(serverConf, []string{clientConf})
+
 			framework.ExpectNoError(framework.WaitForTCPReady(fmt.Sprintf("127.0.0.1:%d", adminPort), 5*time.Second))
 
 			createBody, _ := json.Marshal(map[string]any{
 				"name": "proxy-a",
+
 				"type": "tcp",
+
 				"tcp": map[string]any{
-					"localIP":    "127.0.0.1",
-					"localPort":  f.PortByName(framework.TCPEchoServerPort),
+					"localIP": "127.0.0.1",
+
+					"localPort": f.PortByName(framework.TCPEchoServerPort),
+
 					"remotePort": remotePort,
 				},
 			})
@@ -302,10 +394,14 @@ var _ = ginkgo.Describe("[Feature: Store]", func() {
 
 			updateBody, _ := json.Marshal(map[string]any{
 				"name": "proxy-b",
+
 				"type": "tcp",
+
 				"tcp": map[string]any{
-					"localIP":    "127.0.0.1",
-					"localPort":  f.PortByName(framework.TCPEchoServerPort),
+					"localIP": "127.0.0.1",
+
+					"localPort": f.PortByName(framework.TCPEchoServerPort),
+
 					"remotePort": remotePort,
 				},
 			})

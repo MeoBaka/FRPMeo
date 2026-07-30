@@ -9,6 +9,7 @@ import (
 )
 
 //go:embed dist
+
 var EmbedFS embed.FS
 
 func init() {

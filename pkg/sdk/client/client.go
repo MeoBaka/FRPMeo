@@ -16,9 +16,11 @@ import (
 )
 
 type Client struct {
-	address  string
+	address string
+
 	authUser string
-	authPwd  string
+
+	authPwd string
 }
 
 func New(host string, port int) *Client {
@@ -29,6 +31,7 @@ func New(host string, port int) *Client {
 
 func (c *Client) SetAuth(user, pwd string) {
 	c.authUser = user
+
 	c.authPwd = pwd
 }
 
@@ -37,14 +40,18 @@ func (c *Client) GetProxyStatus(ctx context.Context, name string) (*model.ProxyS
 	if err != nil {
 		return nil, err
 	}
+
 	content, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}
+
 	allStatus := make(model.StatusResp)
+
 	if err = json.Unmarshal([]byte(content), &allStatus); err != nil {
 		return nil, fmt.Errorf("unmarshal http response error: %s", strings.TrimSpace(content))
 	}
+
 	for _, pss := range allStatus {
 		for _, ps := range pss {
 			if ps.Name == name {
@@ -52,6 +59,7 @@ func (c *Client) GetProxyStatus(ctx context.Context, name string) (*model.ProxyS
 			}
 		}
 	}
+
 	return nil, fmt.Errorf("no proxy status found")
 }
 
@@ -60,31 +68,41 @@ func (c *Client) GetAllProxyStatus(ctx context.Context) (model.StatusResp, error
 	if err != nil {
 		return nil, err
 	}
+
 	content, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}
+
 	allStatus := make(model.StatusResp)
+
 	if err = json.Unmarshal([]byte(content), &allStatus); err != nil {
 		return nil, fmt.Errorf("unmarshal http response error: %s", strings.TrimSpace(content))
 	}
+
 	return allStatus, nil
 }
 
 func (c *Client) Reload(ctx context.Context, strictMode bool) error {
 	v := url.Values{}
+
 	if strictMode {
 		v.Set("strictConfig", "true")
 	}
+
 	queryStr := ""
+
 	if len(v) > 0 {
 		queryStr = "?" + v.Encode()
 	}
+
 	req, err := http.NewRequestWithContext(ctx, "GET", "http://"+c.address+"/api/reload"+queryStr, nil)
 	if err != nil {
 		return err
 	}
+
 	_, err = c.do(req)
+
 	return err
 }
 
@@ -93,7 +111,9 @@ func (c *Client) Stop(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	_, err = c.do(req)
+
 	return err
 }
 
@@ -102,6 +122,7 @@ func (c *Client) GetConfig(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	return c.do(req)
 }
 
@@ -110,7 +131,9 @@ func (c *Client) UpdateConfig(ctx context.Context, content string) error {
 	if err != nil {
 		return err
 	}
+
 	_, err = c.do(req)
+
 	return err
 }
 
@@ -127,14 +150,17 @@ func (c *Client) do(req *http.Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("api status code [%d]", resp.StatusCode)
 	}
+
 	buf, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
+
 	return string(buf), nil
 }

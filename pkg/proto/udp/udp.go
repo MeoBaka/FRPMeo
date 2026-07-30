@@ -1,15 +1,27 @@
 // Copyright 2017 fatedier, fatedier@gmail.com
+
 //
+
 // Licensed under the Apache License, Version 2.0 (the "License");
+
 // you may not use this file except in compliance with the License.
+
 // You may obtain a copy of the License at
+
 //
+
 //     http://www.apache.org/licenses/LICENSE-2.0
+
 //
+
 // Unless required by applicable law or agreed to in writing, software
+
 // distributed under the License is distributed on an "AS IS" BASIS,
+
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
 // See the License for the specific language governing permissions and
+
 // limitations under the License.
 
 package udp
@@ -28,10 +40,14 @@ import (
 
 func NewUDPPacket(buf []byte, laddr, raddr *net.UDPAddr) *msg.UDPPacket {
 	content := make([]byte, len(buf))
+
 	copy(content, buf)
+
 	return &msg.UDPPacket{
-		Content:    content,
-		LocalAddr:  laddr,
+		Content: content,
+
+		LocalAddr: laddr,
+
 		RemoteAddr: raddr,
 	}
 }
@@ -41,182 +57,286 @@ func GetContent(m *msg.UDPPacket) (buf []byte, err error) {
 }
 
 // SessionTracker observes distinct UDP source addresses seen by
+
 // ForwardUserConn so a connectionless UDP proxy can still report a meaningful
+
 // "current connections" count. OnOpen fires when a new source first sends a
+
 // packet; OnClose fires when that source has been idle for IdleTimeout (default
+
 // 30s) or when forwarding stops. Both receive the source address, so a caller
+
 // that also serves the same peers over TCP can reconcile the two. It is
+
 // optional — pass nil to disable tracking.
+
 type SessionTracker struct {
-	OnOpen      func(remoteAddr string)
-	OnClose     func(remoteAddr string)
+	OnOpen func(remoteAddr string)
+
+	OnClose func(remoteAddr string)
+
 	IdleTimeout time.Duration
 }
 
 // ForwardUserConn relays packets between a public UDP socket and the work
+
 // connection channels. allow, when non-nil, is consulted for every packet's
+
 // source address; a false verdict drops the packet silently (UDP has no way to
+
 // signal a rejection). Callers are expected to cache their verdicts - this is
+
 // the per-packet hot path.
+
 func ForwardUserConn(
 	udpConn *net.UDPConn,
+
 	readCh <-chan *msg.UDPPacket,
+
 	sendCh chan<- *msg.UDPPacket,
+
 	bufSize int,
+
 	tracker *SessionTracker,
+
 	allow func(remoteAddr string) bool,
 ) {
 	// read
+
 	go func() {
 		for udpMsg := range readCh {
+
 			buf, err := GetContent(udpMsg)
 			if err != nil {
 				continue
 			}
+
 			_, _ = udpConn.WriteToUDP(buf, udpMsg.RemoteAddr)
+
 		}
 	}()
 
 	// Optional per-source session tracking (distinct RemoteAddr with idle expiry).
+
 	var (
-		sessMu   sync.Mutex
+		sessMu sync.Mutex
+
 		sessions map[string]time.Time
 	)
+
 	if tracker != nil {
+
 		if tracker.IdleTimeout <= 0 {
 			tracker.IdleTimeout = 30 * time.Second
 		}
+
 		sessions = make(map[string]time.Time)
+
 		stopJanitor := make(chan struct{})
+
 		defer close(stopJanitor)
+
 		// On exit, release every still-open session so the counter rebalances.
+
 		defer func() {
 			sessMu.Lock()
+
 			for addr := range sessions {
 				tracker.OnClose(addr)
 			}
+
 			sessions = make(map[string]time.Time)
+
 			sessMu.Unlock()
 		}()
+
 		go func() {
 			ticker := time.NewTicker(tracker.IdleTimeout / 2)
+
 			defer ticker.Stop()
+
 			for {
 				select {
+
 				case <-stopJanitor:
+
 					return
+
 				case now := <-ticker.C:
+
 					sessMu.Lock()
+
 					for addr, last := range sessions {
 						if now.Sub(last) > tracker.IdleTimeout {
+
 							delete(sessions, addr)
+
 							tracker.OnClose(addr)
+
 						}
 					}
+
 					sessMu.Unlock()
+
 				}
 			}
 		}()
+
 	}
 
 	// write
+
 	buf := pool.GetBuf(bufSize)
+
 	defer pool.PutBuf(buf)
+
 	for {
+
 		n, remoteAddr, err := udpConn.ReadFromUDP(buf)
 		if err != nil {
 			return
 		}
+
 		if allow != nil && remoteAddr != nil && !allow(remoteAddr.String()) {
 			continue
 		}
+
 		if tracker != nil && remoteAddr != nil {
+
 			key := remoteAddr.String()
+
 			sessMu.Lock()
+
 			if _, ok := sessions[key]; !ok {
 				tracker.OnOpen(key)
 			}
+
 			sessions[key] = time.Now()
+
 			sessMu.Unlock()
+
 		}
+
 		// NewUDPPacket copies buf[:n], so the read buffer can be reused
+
 		udpMsg := NewUDPPacket(buf[:n], nil, remoteAddr)
 
 		select {
+
 		case sendCh <- udpMsg:
+
 		default:
+
 		}
+
 	}
 }
 
 func Forwarder(dstAddr *net.UDPAddr, readCh <-chan *msg.UDPPacket, sendCh chan<- msg.Message, bufSize int, proxyProtocolVersion string) {
 	var mu sync.RWMutex
+
 	udpConnMap := make(map[string]*net.UDPConn)
 
 	// read from dstAddr and write to sendCh
+
 	writerFn := func(raddr *net.UDPAddr, udpConn *net.UDPConn) {
 		addr := raddr.String()
+
 		defer func() {
 			mu.Lock()
+
 			delete(udpConnMap, addr)
+
 			mu.Unlock()
+
 			udpConn.Close()
 		}()
 
 		buf := pool.GetBuf(bufSize)
+
 		defer pool.PutBuf(buf)
+
 		for {
+
 			_ = udpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+
 			n, _, err := udpConn.ReadFromUDP(buf)
 			if err != nil {
 				return
 			}
 
 			udpMsg := NewUDPPacket(buf[:n], nil, raddr)
+
 			if err = errors.PanicToError(func() {
 				select {
+
 				case sendCh <- udpMsg:
+
 				default:
+
 				}
 			}); err != nil {
 				return
 			}
+
 		}
 	}
 
 	// read from readCh
+
 	go func() {
 		for udpMsg := range readCh {
+
 			buf, err := GetContent(udpMsg)
 			if err != nil {
 				continue
 			}
 
 			mu.Lock()
+
 			udpConn, ok := udpConnMap[udpMsg.RemoteAddr.String()]
+
 			if !ok {
+
 				udpConn, err = net.DialUDP("udp", nil, dstAddr)
 				if err != nil {
+
 					mu.Unlock()
+
 					continue
+
 				}
+
 				udpConnMap[udpMsg.RemoteAddr.String()] = udpConn
+
 			}
+
 			mu.Unlock()
 
 			// Add proxy protocol header if configured (only for the first packet of a new connection)
+
 			if !ok && proxyProtocolVersion != "" && udpMsg.RemoteAddr != nil {
+
 				ppBuf, err := netpkg.BuildProxyProtocolHeader(udpMsg.RemoteAddr, dstAddr, proxyProtocolVersion)
+
 				if err == nil {
+
 					// Prepend proxy protocol header to the UDP payload
+
 					finalBuf := make([]byte, len(ppBuf)+len(buf))
+
 					copy(finalBuf, ppBuf)
+
 					copy(finalBuf[len(ppBuf):], buf)
+
 					buf = finalBuf
+
 				}
+
 			}
 
 			_, err = udpConn.Write(buf)
+
 			if err != nil {
 				udpConn.Close()
 			} else {
@@ -226,6 +346,7 @@ func Forwarder(dstAddr *net.UDPAddr, readCh <-chan *msg.UDPPacket, sendCh chan<-
 			if !ok {
 				go writerFn(udpMsg.RemoteAddr, udpConn)
 			}
+
 		}
 	}()
 }

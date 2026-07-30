@@ -1,15 +1,27 @@
 // Copyright 2025 The frp Authors
+
 //
+
 // Licensed under the Apache License, Version 2.0 (the "License");
+
 // you may not use this file except in compliance with the License.
+
 // You may obtain a copy of the License at
+
 //
+
 //     http://www.apache.org/licenses/LICENSE-2.0
+
 //
+
 // Unless required by applicable law or agreed to in writing, software
+
 // distributed under the License is distributed on an "AS IS" BASIS,
+
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
 // See the License for the specific language governing permissions and
+
 // limitations under the License.
 
 package basic
@@ -35,69 +47,113 @@ var _ = ginkgo.Describe("[Feature: TokenSource]", func() {
 	f := framework.NewDefaultFramework()
 
 	// createExecTokenSource writes a program that echoes the value it is handed,
+
 	// and returns the `command` and `args` a tokenSource needs to run it. Both
+
 	// are returned already rendered as TOML, since what they hold differs by
+
 	// platform: a shebang script cannot be executed on Windows, and CreateProcess
+
 	// will not run a batch file either, so there the command interpreter has to
+
 	// be named and the script passed to it.
+
 	createExecTokenSource := func(name, value string) (command, args string) {
 		if runtime.GOOS == "windows" {
+
 			scriptPath := filepath.Join(f.TempDirectory, strings.TrimSuffix(name, ".sh")+".bat")
+
 			// %~1 is the first argument with its quotes stripped.
+
 			err := os.WriteFile(scriptPath, []byte("@echo off\r\necho %~1\r\n"), 0o600)
+
 			framework.ExpectNoError(err)
+
 			// Named in full rather than by name: frp is started with a trimmed
+
 			// environment that carries no PATH, so a bare "cmd.exe" would not
+
 			// be found.
+
 			shell := os.Getenv("COMSPEC")
+
 			if shell == "" {
 				shell = `C:\Windows\system32\cmd.exe`
 			}
+
 			return fmt.Sprintf("%q", shell),
+
 				fmt.Sprintf("[%q, %q, %q]", "/c", scriptPath, value)
+
 		}
 
 		scriptPath := filepath.Join(f.TempDirectory, name)
+
 		scriptContent := `#!/bin/sh
+
 printf '%s\n' "$1"
+
 `
+
 		err := os.WriteFile(scriptPath, []byte(scriptContent), 0o600)
+
 		framework.ExpectNoError(err)
+
 		err = os.Chmod(scriptPath, 0o700)
+
 		framework.ExpectNoError(err)
+
 		return fmt.Sprintf("%q", scriptPath), fmt.Sprintf("[%q]", value)
 	}
 
 	ginkgo.Describe("File-based token loading", func() {
 		ginkgo.It("should work with file tokenSource", func() {
 			// Create a temporary token file
+
 			tmpDir := f.TempDirectory
+
 			tokenFile := filepath.Join(tmpDir, "test_token")
+
 			tokenContent := "test-token-123"
 
 			err := os.WriteFile(tokenFile, []byte(tokenContent), 0o600)
+
 			framework.ExpectNoError(err)
 
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig
 
 			portName := port.GenName("TCP")
 
 			// Server config with tokenSource
+
 			serverConf += fmt.Sprintf(`
+
 auth.tokenSource.type = "file"
+
 auth.tokenSource.file.path = %q
+
 `, tokenFile)
 
 			// Client config with matching token
+
 			clientConf += fmt.Sprintf(`
+
 auth.token = "%s"
 
+
+
 [[proxies]]
+
 name = "tcp"
+
 type = "tcp"
+
 localPort = {{ .%s }}
+
 remotePort = {{ .%s }}
+
 `, tokenContent, framework.TCPEchoServerPort, portName)
 
 			f.RunProcesses(serverConf, []string{clientConf})
@@ -107,33 +163,51 @@ remotePort = {{ .%s }}
 
 		ginkgo.It("should work with client tokenSource", func() {
 			// Create a temporary token file
+
 			tmpDir := f.TempDirectory
+
 			tokenFile := filepath.Join(tmpDir, "client_token")
+
 			tokenContent := "client-token-456"
 
 			err := os.WriteFile(tokenFile, []byte(tokenContent), 0o600)
+
 			framework.ExpectNoError(err)
 
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig
 
 			portName := port.GenName("TCP")
 
 			// Server config with matching token
+
 			serverConf += fmt.Sprintf(`
+
 auth.token = "%s"
+
 `, tokenContent)
 
 			// Client config with tokenSource
+
 			clientConf += fmt.Sprintf(`
+
 auth.tokenSource.type = "file"
+
 auth.tokenSource.file.path = %q
 
+
+
 [[proxies]]
+
 name = "tcp"
+
 type = "tcp"
+
 localPort = {{ .%s }}
+
 remotePort = {{ .%s }}
+
 `, tokenFile, framework.TCPEchoServerPort, portName)
 
 			f.RunProcesses(serverConf, []string{clientConf})
@@ -143,38 +217,59 @@ remotePort = {{ .%s }}
 
 		ginkgo.It("should work with both server and client tokenSource", func() {
 			// Create temporary token files
+
 			tmpDir := f.TempDirectory
+
 			serverTokenFile := filepath.Join(tmpDir, "server_token")
+
 			clientTokenFile := filepath.Join(tmpDir, "client_token")
+
 			tokenContent := "shared-token-789"
 
 			err := os.WriteFile(serverTokenFile, []byte(tokenContent), 0o600)
+
 			framework.ExpectNoError(err)
 
 			err = os.WriteFile(clientTokenFile, []byte(tokenContent), 0o600)
+
 			framework.ExpectNoError(err)
 
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig
 
 			portName := port.GenName("TCP")
 
 			// Server config with tokenSource
+
 			serverConf += fmt.Sprintf(`
+
 auth.tokenSource.type = "file"
+
 auth.tokenSource.file.path = %q
+
 `, serverTokenFile)
 
 			// Client config with tokenSource
+
 			clientConf += fmt.Sprintf(`
+
 auth.tokenSource.type = "file"
+
 auth.tokenSource.file.path = %q
 
+
+
 [[proxies]]
+
 name = "tcp"
+
 type = "tcp"
+
 localPort = {{ .%s }}
+
 remotePort = {{ .%s }}
+
 `, clientTokenFile, framework.TCPEchoServerPort, portName)
 
 			f.RunProcesses(serverConf, []string{clientConf})
@@ -184,56 +279,85 @@ remotePort = {{ .%s }}
 
 		ginkgo.It("should fail with mismatched tokens", func() {
 			// Create temporary token files with different content
+
 			tmpDir := f.TempDirectory
+
 			serverTokenFile := filepath.Join(tmpDir, "server_token")
+
 			clientTokenFile := filepath.Join(tmpDir, "client_token")
 
 			err := os.WriteFile(serverTokenFile, []byte("server-token"), 0o600)
+
 			framework.ExpectNoError(err)
 
 			err = os.WriteFile(clientTokenFile, []byte("client-token"), 0o600)
+
 			framework.ExpectNoError(err)
 
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig
 
 			portName := port.GenName("TCP")
 
 			// Server config with tokenSource
+
 			serverConf += fmt.Sprintf(`
+
 auth.tokenSource.type = "file"
+
 auth.tokenSource.file.path = %q
+
 `, serverTokenFile)
 
 			// Client config with different tokenSource
+
 			clientConf += fmt.Sprintf(`
+
 auth.tokenSource.type = "file"
+
 auth.tokenSource.file.path = %q
 
+
+
 [[proxies]]
+
 name = "tcp"
+
 type = "tcp"
+
 localPort = {{ .%s }}
+
 remotePort = {{ .%s }}
+
 `, clientTokenFile, framework.TCPEchoServerPort, portName)
 
 			f.RunProcesses(serverConf, []string{clientConf})
 
 			// This should fail due to token mismatch - the client should not be able to connect
+
 			// We expect the request to fail because the proxy tunnel is not established
+
 			framework.NewRequestExpect(f).PortName(portName).ExpectError(true).Ensure()
 		})
 
 		ginkgo.It("should fail with non-existent token file", func() {
 			tmpDir := f.TempDirectory
+
 			nonExistentFile := filepath.Join(tmpDir, "non_existent_token")
 
 			serverPort := f.AllocPort()
+
 			serverConf := fmt.Sprintf(`
+
 bindAddr = "0.0.0.0"
+
 bindPort = %d
+
 auth.tokenSource.type = "file"
+
 auth.tokenSource.file.path = %q
+
 `, serverPort, nonExistentFile)
 
 			serverConfigPath := f.GenerateConfigFile(serverConf)
@@ -241,10 +365,13 @@ auth.tokenSource.file.path = %q
 			_, _, _ = f.RunFrps("-c", serverConfigPath)
 
 			// Server should have failed to start, so the port should not be listening.
+
 			conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(serverPort)), 1*time.Second)
+
 			if err == nil {
 				conn.Close()
 			}
+
 			framework.ExpectTrue(err != nil, "server should not be listening on port %d", serverPort)
 		})
 	})
@@ -252,40 +379,63 @@ auth.tokenSource.file.path = %q
 	ginkgo.Describe("Exec-based token loading", func() {
 		ginkgo.It("should work with server tokenSource", func() {
 			execValue := "exec-server-value"
+
 			command, args := createExecTokenSource("server_token_exec.sh", execValue)
 
 			serverPort := f.AllocPort()
+
 			remotePort := f.AllocPort()
 
 			serverConf := fmt.Sprintf(`
+
 bindAddr = "0.0.0.0"
+
 bindPort = %d
 
+
+
 auth.tokenSource.type = "exec"
+
 auth.tokenSource.exec.command = %s
+
 auth.tokenSource.exec.args = %s
+
 `, serverPort, command, args)
 
 			clientConf := fmt.Sprintf(`
+
 serverAddr = "127.0.0.1"
+
 serverPort = %d
+
 loginFailExit = false
+
 auth.token = %q
 
+
+
 [[proxies]]
+
 name = "tcp"
+
 type = "tcp"
+
 localPort = %d
+
 remotePort = %d
+
 `, serverPort, execValue, f.PortByName(framework.TCPEchoServerPort), remotePort)
 
 			serverConfigPath := f.GenerateConfigFile(serverConf)
+
 			clientConfigPath := f.GenerateConfigFile(clientConf)
 
 			_, _, err := f.RunFrps("-c", serverConfigPath, "--allow-unsafe=TokenSourceExec")
+
 			framework.ExpectNoError(err)
 
 			_, _, err = f.RunFrpc("-c", clientConfigPath, "--allow-unsafe=TokenSourceExec")
+
 			framework.ExpectNoError(err)
 
 			framework.NewRequestExpect(f).Port(remotePort).Ensure()
@@ -293,41 +443,65 @@ remotePort = %d
 
 		ginkgo.It("should work with client tokenSource", func() {
 			execValue := "exec-client-value"
+
 			command, args := createExecTokenSource("client_token_exec.sh", execValue)
 
 			serverPort := f.AllocPort()
+
 			remotePort := f.AllocPort()
 
 			serverConf := fmt.Sprintf(`
+
 bindAddr = "0.0.0.0"
+
 bindPort = %d
 
+
+
 auth.token = %q
+
 `, serverPort, execValue)
 
 			clientConf := fmt.Sprintf(`
+
 serverAddr = "127.0.0.1"
+
 serverPort = %d
+
 loginFailExit = false
 
+
+
 auth.tokenSource.type = "exec"
+
 auth.tokenSource.exec.command = %s
+
 auth.tokenSource.exec.args = %s
 
+
+
 [[proxies]]
+
 name = "tcp"
+
 type = "tcp"
+
 localPort = %d
+
 remotePort = %d
+
 `, serverPort, command, args, f.PortByName(framework.TCPEchoServerPort), remotePort)
 
 			serverConfigPath := f.GenerateConfigFile(serverConf)
+
 			clientConfigPath := f.GenerateConfigFile(clientConf)
 
 			_, _, err := f.RunFrps("-c", serverConfigPath, "--allow-unsafe=TokenSourceExec")
+
 			framework.ExpectNoError(err)
 
 			_, _, err = f.RunFrpc("-c", clientConfigPath, "--allow-unsafe=TokenSourceExec")
+
 			framework.ExpectNoError(err)
 
 			framework.NewRequestExpect(f).Port(remotePort).Ensure()
@@ -335,43 +509,69 @@ remotePort = %d
 
 		ginkgo.It("should work with both server and client tokenSource", func() {
 			execValue := "exec-shared-value"
+
 			command, args := createExecTokenSource("shared_token_exec.sh", execValue)
 
 			serverPort := f.AllocPort()
+
 			remotePort := f.AllocPort()
 
 			serverConf := fmt.Sprintf(`
+
 bindAddr = "0.0.0.0"
+
 bindPort = %d
 
+
+
 auth.tokenSource.type = "exec"
+
 auth.tokenSource.exec.command = %s
+
 auth.tokenSource.exec.args = %s
+
 `, serverPort, command, args)
 
 			clientConf := fmt.Sprintf(`
+
 serverAddr = "127.0.0.1"
+
 serverPort = %d
+
 loginFailExit = false
 
+
+
 auth.tokenSource.type = "exec"
+
 auth.tokenSource.exec.command = %s
+
 auth.tokenSource.exec.args = %s
 
+
+
 [[proxies]]
+
 name = "tcp"
+
 type = "tcp"
+
 localPort = %d
+
 remotePort = %d
+
 `, serverPort, command, args, f.PortByName(framework.TCPEchoServerPort), remotePort)
 
 			serverConfigPath := f.GenerateConfigFile(serverConf)
+
 			clientConfigPath := f.GenerateConfigFile(clientConf)
 
 			_, _, err := f.RunFrps("-c", serverConfigPath, "--allow-unsafe=TokenSourceExec")
+
 			framework.ExpectNoError(err)
 
 			_, _, err = f.RunFrpc("-c", clientConfigPath, "--allow-unsafe=TokenSourceExec")
+
 			framework.ExpectNoError(err)
 
 			framework.NewRequestExpect(f).Port(remotePort).Ensure()
@@ -379,22 +579,33 @@ remotePort = %d
 
 		ginkgo.It("should fail validation without allow-unsafe", func() {
 			execValue := "exec-unsafe-value"
+
 			command, args := createExecTokenSource("unsafe_token_exec.sh", execValue)
 
 			serverPort := f.AllocPort()
+
 			serverConf := fmt.Sprintf(`
+
 bindAddr = "0.0.0.0"
+
 bindPort = %d
 
+
+
 auth.tokenSource.type = "exec"
+
 auth.tokenSource.exec.command = %s
+
 auth.tokenSource.exec.args = %s
+
 `, serverPort, command, args)
 
 			serverConfigPath := f.GenerateConfigFile(serverConf)
 
 			_, output, err := f.RunFrps("verify", "-c", serverConfigPath)
+
 			framework.ExpectNoError(err)
+
 			framework.ExpectContainSubstring(output, "unsafe feature \"TokenSourceExec\" is not enabled")
 		})
 	})

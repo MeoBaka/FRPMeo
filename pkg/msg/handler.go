@@ -1,15 +1,27 @@
 // Copyright 2023 The frp Authors
+
 //
+
 // Licensed under the Apache License, Version 2.0 (the "License");
+
 // you may not use this file except in compliance with the License.
+
 // You may obtain a copy of the License at
+
 //
+
 //     http://www.apache.org/licenses/LICENSE-2.0
+
 //
+
 // Unless required by applicable law or agreed to in writing, software
+
 // distributed under the License is distributed on an "AS IS" BASIS,
+
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
 // See the License for the specific language governing permissions and
+
 // limitations under the License.
 
 package msg
@@ -25,19 +37,23 @@ import (
 
 type ReadWriter interface {
 	ReadMsg() (Message, error)
+
 	ReadMsgInto(Message) error
+
 	WriteMsg(Message) error
 }
 
 type Conn struct {
 	net.Conn
+
 	rw ReadWriter
 }
 
 func NewConn(conn net.Conn, rw ReadWriter) *Conn {
 	return &Conn{
 		Conn: conn,
-		rw:   rw,
+
+		rw: rw,
 	}
 }
 
@@ -57,6 +73,7 @@ func (c *Conn) Context() context.Context {
 	if getter, ok := c.Conn.(interface{ Context() context.Context }); ok {
 		return getter.Context()
 	}
+
 	return context.Background()
 }
 
@@ -75,15 +92,24 @@ func NewV1ReadWriter(rw io.ReadWriter) ReadWriter {
 }
 
 // NewReadWriter wraps rw with the message codec for the selected wire protocol.
+
 // An empty protocol keeps the historical v1 behavior for tests and older call sites.
+
 func NewReadWriter(rw io.ReadWriter, wireProtocol string) ReadWriter {
 	switch wireProtocol {
+
 	case wire.ProtocolV2:
+
 		return NewV2ReadWriter(rw)
+
 	case "", wire.ProtocolV1:
+
 		return NewV1ReadWriter(rw)
+
 	default:
+
 		return NewV1ReadWriter(rw)
+
 	}
 }
 
@@ -106,60 +132,83 @@ func AsyncHandler(f func(Message)) func(Message) {
 }
 
 // Dispatcher is used to send messages to net.Conn or register handlers for messages read from net.Conn.
+
 type Dispatcher struct {
 	rw ReadWriter
 
-	sendCh      chan Message
-	doneCh      chan struct{}
+	sendCh chan Message
+
+	doneCh chan struct{}
+
 	msgHandlers map[reflect.Type]func(Message)
 }
 
 func NewDispatcher(rw ReadWriter) *Dispatcher {
 	return &Dispatcher{
-		rw:          rw,
-		sendCh:      make(chan Message, 100),
-		doneCh:      make(chan struct{}),
+		rw: rw,
+
+		sendCh: make(chan Message, 100),
+
+		doneCh: make(chan struct{}),
+
 		msgHandlers: make(map[reflect.Type]func(Message)),
 	}
 }
 
 // Run will block until io.EOF or some error occurs.
+
 func (d *Dispatcher) Run() {
 	go d.sendLoop()
+
 	go d.readLoop()
 }
 
 func (d *Dispatcher) sendLoop() {
 	for {
 		select {
+
 		case <-d.doneCh:
+
 			return
+
 		case m := <-d.sendCh:
+
 			_ = d.rw.WriteMsg(m)
+
 		}
 	}
 }
 
 func (d *Dispatcher) readLoop() {
 	for {
+
 		m, err := d.rw.ReadMsg()
 		if err != nil {
+
 			close(d.doneCh)
+
 			return
+
 		}
 
 		if handler, ok := d.msgHandlers[reflect.TypeOf(m)]; ok {
 			handler(m)
 		}
+
 	}
 }
 
 func (d *Dispatcher) Send(m Message) error {
 	select {
+
 	case <-d.doneCh:
+
 		return io.EOF
+
 	case d.sendCh <- m:
+
 		return nil
+
 	}
 }
 
