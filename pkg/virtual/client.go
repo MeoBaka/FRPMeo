@@ -1,15 +1,27 @@
 // Copyright 2023 The frp Authors
+
 //
+
 // Licensed under the Apache License, Version 2.0 (the "License");
+
 // you may not use this file except in compliance with the License.
+
 // You may obtain a copy of the License at
+
 //
+
 //     http://www.apache.org/licenses/LICENSE-2.0
+
 //
+
 // Unless required by applicable law or agreed to in writing, software
+
 // distributed under the License is distributed on an "AS IS" BASIS,
+
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
 // See the License for the specific language governing permissions and
+
 // limitations under the License.
 
 package virtual
@@ -27,53 +39,76 @@ import (
 )
 
 type ClientOptions struct {
-	Common           *v1.ClientCommonConfig
-	Spec             *msg.ClientSpec
+	Common *v1.ClientCommonConfig
+
+	Spec *msg.ClientSpec
+
 	HandleWorkConnCb func(*v1.ProxyBaseConfig, net.Conn, *msg.StartWorkConn) bool
 }
 
 type Client struct {
-	l   *netpkg.InternalListener
+	l *netpkg.InternalListener
+
 	svr *client.Service
 }
 
 func NewClient(options ClientOptions) (*Client, error) {
 	if options.Common != nil {
+
 		// The virtual client always reaches the server through an in-memory
+
 		// net.Pipe (see pipeConnector below), which is fully synchronous and
+
 		// unbuffered. The v2 wire protocol runs a ClientHello/ServerHello
+
 		// exchange before the Login message is consumed; over an unbuffered
+
 		// pipe both sides end up blocked on a write at the same time and the
+
 		// handshake deadlocks. Force the legacy v1 codec, which is a plain
+
 		// request/response sequence needing no buffering. Encryption would be
+
 		// pointless here anyway since the pipe never leaves the process.
+
 		options.Common.Transport.WireProtocol = wire.ProtocolV1
+
 		if err := options.Common.Complete(); err != nil {
 			return nil, err
 		}
+
 	}
 
 	ln := netpkg.NewInternalListener()
+
 	configSource := source.NewConfigSource()
+
 	aggregator := source.NewAggregator(configSource)
 
 	serviceOptions := client.ServiceOptions{
-		Common:                 options.Common,
+		Common: options.Common,
+
 		ConfigSourceAggregator: aggregator,
-		ClientSpec:             options.Spec,
+
+		ClientSpec: options.Spec,
+
 		ConnectorCreator: func(context.Context, *v1.ClientCommonConfig) client.Connector {
 			return &pipeConnector{
 				peerListener: ln,
 			}
 		},
+
 		HandleWorkConnCb: options.HandleWorkConnCb,
 	}
+
 	svr, err := client.NewService(serviceOptions)
 	if err != nil {
 		return nil, err
 	}
+
 	return &Client{
-		l:   ln,
+		l: ln,
+
 		svr: svr,
 	}, nil
 }
@@ -96,6 +131,7 @@ func (c *Client) Service() *client.Service {
 
 func (c *Client) Close() {
 	c.svr.Close()
+
 	c.l.Close()
 }
 
@@ -109,15 +145,22 @@ func (pc *pipeConnector) Open() error {
 
 func (pc *pipeConnector) Connect() (net.Conn, error) {
 	c1, c2 := net.Pipe()
+
 	if err := pc.peerListener.PutConn(c1); err != nil {
+
 		c1.Close()
+
 		c2.Close()
+
 		return nil, err
+
 	}
+
 	return c2, nil
 }
 
 func (pc *pipeConnector) Close() error {
 	pc.peerListener.Close()
+
 	return nil
 }

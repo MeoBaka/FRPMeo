@@ -1,15 +1,27 @@
 // Copyright 2023 The frp Authors
+
 //
+
 // Licensed under the Apache License, Version 2.0 (the "License");
+
 // you may not use this file except in compliance with the License.
+
 // You may obtain a copy of the License at
+
 //
+
 //     http://www.apache.org/licenses/LICENSE-2.0
+
 //
+
 // Unless required by applicable law or agreed to in writing, software
+
 // distributed under the License is distributed on an "AS IS" BASIS,
+
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
 // See the License for the specific language governing permissions and
+
 // limitations under the License.
 
 package v1
@@ -27,123 +39,203 @@ import (
 
 type ProxyTransport struct {
 	// UseEncryption controls whether or not communication with the server will
+
 	// be encrypted. Encryption is done using the tokens supplied in the server
+
 	// and client configuration.
+
 	UseEncryption bool `json:"useEncryption,omitempty"`
+
 	// UseCompression controls whether or not communication with the server
+
 	// will be compressed.
+
 	UseCompression bool `json:"useCompression,omitempty"`
+
 	// BandwidthLimit limit the bandwidth
+
 	// 0 means no limit
+
 	BandwidthLimit types.BandwidthQuantity `json:"bandwidthLimit,omitempty"`
+
 	// BandwidthLimitMode specifies whether to limit the bandwidth on the
+
 	// client or server side. Valid values include "client" and "server".
+
 	// By default, this value is "client".
+
 	BandwidthLimitMode string `json:"bandwidthLimitMode,omitempty"`
+
 	// ProxyProtocolVersion specifies which protocol version to use. Valid
+
 	// values include "v1", "v2", and "". If the value is "", a protocol
+
 	// version will be automatically selected. By default, this value is "".
+
 	ProxyProtocolVersion string `json:"proxyProtocolVersion,omitempty"`
 }
 
 type LoadBalancerConfig struct {
 	// Group specifies which group the is a part of. The server will use
+
 	// this information to load balance proxies in the same group. If the value
+
 	// is "", this will not be in a group.
+
 	Group string `json:"group"`
+
 	// GroupKey specifies a group key, which should be the same among proxies
+
 	// of the same group.
+
 	GroupKey string `json:"groupKey,omitempty"`
 }
 
 type ProxyBackend struct {
 	// LocalIP specifies the IP address or host name of the backend.
+
 	LocalIP string `json:"localIP,omitempty"`
+
 	// LocalPort specifies the port of the backend.
+
 	LocalPort int `json:"localPort,omitempty"`
 
 	// Plugin specifies what plugin should be used for handling connections. If this value
+
 	// is set, the LocalIP and LocalPort values will be ignored.
+
 	Plugin TypedClientPluginOptions `json:"plugin,omitempty"`
 }
 
 // HealthCheckConfig configures health checking. This can be useful for load
+
 // balancing purposes to detect and remove proxies to failing services.
+
 type HealthCheckConfig struct {
 	// Type specifies what protocol to use for health checking.
+
 	// Valid values include "tcp", "http", and "". If this value is "", health
+
 	// checking will not be performed.
+
 	//
+
 	// If the type is "tcp", a connection will be attempted to the target
+
 	// server. If a connection cannot be established, the health check fails.
+
 	//
+
 	// If the type is "http", a GET request will be made to the endpoint
+
 	// specified by HealthCheckURL. If the response is not a 200, the health
+
 	// check fails.
+
 	Type string `json:"type"` // tcp | http
+
 	// TimeoutSeconds specifies the number of seconds to wait for a health
+
 	// check attempt to connect. If the timeout is reached, this counts as a
+
 	// health check failure. By default, this value is 3.
+
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+
 	// MaxFailed specifies the number of allowed failures before the
+
 	// is stopped. By default, this value is 1.
+
 	MaxFailed int `json:"maxFailed,omitempty"`
+
 	// IntervalSeconds specifies the time in seconds between health
+
 	// checks. By default, this value is 10.
+
 	IntervalSeconds int `json:"intervalSeconds"`
+
 	// Path specifies the path to send health checks to if the
+
 	// health check type is "http".
+
 	Path string `json:"path,omitempty"`
+
 	// HTTPHeaders specifies the headers to send with the health request, if
+
 	// the health check type is "http".
+
 	HTTPHeaders []HTTPHeader `json:"httpHeaders,omitempty"`
 }
 
 func (c HealthCheckConfig) Clone() HealthCheckConfig {
 	out := c
+
 	out.HTTPHeaders = slices.Clone(c.HTTPHeaders)
+
 	return out
 }
 
 type DomainConfig struct {
 	CustomDomains []string `json:"customDomains,omitempty"`
-	SubDomain     string   `json:"subdomain,omitempty"`
+
+	SubDomain string `json:"subdomain,omitempty"`
 }
 
 func (c DomainConfig) Clone() DomainConfig {
 	out := c
+
 	out.CustomDomains = slices.Clone(c.CustomDomains)
+
 	return out
 }
 
 type ProxyBaseConfig struct {
 	Name string `json:"name"`
+
 	Type string `json:"type"`
+
 	// Enabled controls whether this proxy is enabled. nil or true means enabled, false means disabled.
+
 	// This allows individual control over each proxy, complementing the global "start" field.
-	Enabled     *bool             `json:"enabled,omitempty"`
+
+	Enabled *bool `json:"enabled,omitempty"`
+
 	Annotations map[string]string `json:"annotations,omitempty"`
-	Transport   ProxyTransport    `json:"transport,omitempty"`
+
+	Transport ProxyTransport `json:"transport,omitempty"`
+
 	// metadata info for each proxy
-	Metadatas    map[string]string  `json:"metadatas,omitempty"`
+
+	Metadatas map[string]string `json:"metadatas,omitempty"`
+
 	LoadBalancer LoadBalancerConfig `json:"loadBalancer,omitempty"`
-	HealthCheck  HealthCheckConfig  `json:"healthCheck,omitempty"`
+
+	HealthCheck HealthCheckConfig `json:"healthCheck,omitempty"`
+
 	ProxyBackend
 }
 
 func (c ProxyBaseConfig) Clone() ProxyBaseConfig {
 	out := c
+
 	out.Enabled = util.ClonePtr(c.Enabled)
+
 	out.Annotations = maps.Clone(c.Annotations)
+
 	out.Metadatas = maps.Clone(c.Metadatas)
+
 	out.HealthCheck = c.HealthCheck.Clone()
+
 	out.ProxyBackend = c.ProxyBackend.Clone()
+
 	return out
 }
 
 func (c ProxyBackend) Clone() ProxyBackend {
 	out := c
+
 	out.Plugin = c.Plugin.Clone()
+
 	return out
 }
 
@@ -153,6 +245,7 @@ func (c *ProxyBaseConfig) GetBaseConfig() *ProxyBaseConfig {
 
 func (c *ProxyBaseConfig) Complete() {
 	c.LocalIP = util.EmptyOr(c.LocalIP, "127.0.0.1")
+
 	c.Transport.BandwidthLimitMode = util.EmptyOr(c.Transport.BandwidthLimitMode, types.BandwidthLimitModeClient)
 
 	if c.Plugin.ClientPluginOptions != nil {
@@ -162,39 +255,59 @@ func (c *ProxyBaseConfig) Complete() {
 
 func (c *ProxyBaseConfig) MarshalToMsg(m *msg.NewProxy) {
 	m.ProxyName = c.Name
+
 	m.ProxyType = c.Type
+
 	m.UseEncryption = c.Transport.UseEncryption
+
 	m.UseCompression = c.Transport.UseCompression
+
 	m.BandwidthLimit = c.Transport.BandwidthLimit.String()
+
 	// leave it empty for default value to reduce traffic
+
 	if c.Transport.BandwidthLimitMode != "client" {
 		m.BandwidthLimitMode = c.Transport.BandwidthLimitMode
 	}
+
 	m.Group = c.LoadBalancer.Group
+
 	m.GroupKey = c.LoadBalancer.GroupKey
+
 	m.Metas = c.Metadatas
+
 	m.Annotations = c.Annotations
 }
 
 func (c *ProxyBaseConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.Name = m.ProxyName
+
 	c.Type = m.ProxyType
+
 	c.Transport.UseEncryption = m.UseEncryption
+
 	c.Transport.UseCompression = m.UseCompression
+
 	if m.BandwidthLimit != "" {
 		c.Transport.BandwidthLimit, _ = types.NewBandwidthQuantity(m.BandwidthLimit)
 	}
+
 	if m.BandwidthLimitMode != "" {
 		c.Transport.BandwidthLimitMode = m.BandwidthLimitMode
 	}
+
 	c.LoadBalancer.Group = m.Group
+
 	c.LoadBalancer.GroupKey = m.GroupKey
+
 	c.Metadatas = m.Metas
+
 	c.Annotations = m.Annotations
 }
 
 type TypedProxyConfig struct {
 	Type string `json:"type"`
+
 	ProxyConfigurer
 }
 
@@ -205,7 +318,9 @@ func (c *TypedProxyConfig) UnmarshalJSON(b []byte) error {
 	}
 
 	c.Type = configurer.GetBaseConfig().Type
+
 	c.ProxyConfigurer = configurer
+
 	return nil
 }
 
@@ -215,59 +330,97 @@ func (c *TypedProxyConfig) MarshalJSON() ([]byte, error) {
 
 type ProxyConfigurer interface {
 	Complete()
+
 	GetBaseConfig() *ProxyBaseConfig
+
 	Clone() ProxyConfigurer
+
 	// MarshalToMsg marshals this config into a msg.NewProxy message. This
+
 	// function will be called on the frpc side.
+
 	MarshalToMsg(*msg.NewProxy)
+
 	// UnmarshalFromMsg unmarshal a msg.NewProxy message into this config.
+
 	// This function will be called on the frps side.
+
 	UnmarshalFromMsg(*msg.NewProxy)
 }
 
 type ProxyType string
 
 const (
-	ProxyTypeTCP      ProxyType = "tcp"
-	ProxyTypeUDP      ProxyType = "udp"
-	ProxyTypeTCPMUX   ProxyType = "tcpmux"
-	ProxyTypeHTTP     ProxyType = "http"
-	ProxyTypeHTTPS    ProxyType = "https"
-	ProxyTypeSTCP     ProxyType = "stcp"
-	ProxyTypeXTCP     ProxyType = "xtcp"
-	ProxyTypeSUDP     ProxyType = "sudp"
-	ProxyTypeXUDP     ProxyType = "xudp"
-	ProxyTypeTCPUDP   ProxyType = "tcp+udp"
+	ProxyTypeTCP ProxyType = "tcp"
+
+	ProxyTypeUDP ProxyType = "udp"
+
+	ProxyTypeTCPMUX ProxyType = "tcpmux"
+
+	ProxyTypeHTTP ProxyType = "http"
+
+	ProxyTypeHTTPS ProxyType = "https"
+
+	ProxyTypeSTCP ProxyType = "stcp"
+
+	ProxyTypeXTCP ProxyType = "xtcp"
+
+	ProxyTypeSUDP ProxyType = "sudp"
+
+	ProxyTypeXUDP ProxyType = "xudp"
+
+	ProxyTypeTCPUDP ProxyType = "tcp+udp"
+
 	ProxyTypeSTCPSUDP ProxyType = "stcp+sudp"
+
 	ProxyTypeXTCPXUDP ProxyType = "xtcp+xudp"
-	ProxyTypeMC       ProxyType = "mc"
-	ProxyTypePE       ProxyType = "pe"
+
+	ProxyTypeMC ProxyType = "mc"
+
+	ProxyTypePE ProxyType = "pe"
 )
 
 var proxyConfigTypeMap = map[ProxyType]reflect.Type{
-	ProxyTypeTCP:      reflect.TypeFor[TCPProxyConfig](),
-	ProxyTypeUDP:      reflect.TypeFor[UDPProxyConfig](),
-	ProxyTypeHTTP:     reflect.TypeFor[HTTPProxyConfig](),
-	ProxyTypeHTTPS:    reflect.TypeFor[HTTPSProxyConfig](),
-	ProxyTypeTCPMUX:   reflect.TypeFor[TCPMuxProxyConfig](),
-	ProxyTypeSTCP:     reflect.TypeFor[STCPProxyConfig](),
-	ProxyTypeXTCP:     reflect.TypeFor[XTCPProxyConfig](),
-	ProxyTypeSUDP:     reflect.TypeFor[SUDPProxyConfig](),
-	ProxyTypeXUDP:     reflect.TypeFor[XUDPProxyConfig](),
-	ProxyTypeTCPUDP:   reflect.TypeFor[TCPUDPProxyConfig](),
+	ProxyTypeTCP: reflect.TypeFor[TCPProxyConfig](),
+
+	ProxyTypeUDP: reflect.TypeFor[UDPProxyConfig](),
+
+	ProxyTypeHTTP: reflect.TypeFor[HTTPProxyConfig](),
+
+	ProxyTypeHTTPS: reflect.TypeFor[HTTPSProxyConfig](),
+
+	ProxyTypeTCPMUX: reflect.TypeFor[TCPMuxProxyConfig](),
+
+	ProxyTypeSTCP: reflect.TypeFor[STCPProxyConfig](),
+
+	ProxyTypeXTCP: reflect.TypeFor[XTCPProxyConfig](),
+
+	ProxyTypeSUDP: reflect.TypeFor[SUDPProxyConfig](),
+
+	ProxyTypeXUDP: reflect.TypeFor[XUDPProxyConfig](),
+
+	ProxyTypeTCPUDP: reflect.TypeFor[TCPUDPProxyConfig](),
+
 	ProxyTypeSTCPSUDP: reflect.TypeFor[STCPSUDPProxyConfig](),
+
 	ProxyTypeXTCPXUDP: reflect.TypeFor[XTCPXUDPProxyConfig](),
-	ProxyTypeMC:       reflect.TypeFor[MCProxyConfig](),
-	ProxyTypePE:       reflect.TypeFor[PEProxyConfig](),
+
+	ProxyTypeMC: reflect.TypeFor[MCProxyConfig](),
+
+	ProxyTypePE: reflect.TypeFor[PEProxyConfig](),
 }
 
 func NewProxyConfigurerByType(proxyType ProxyType) ProxyConfigurer {
 	v, ok := proxyConfigTypeMap[proxyType]
+
 	if !ok {
 		return nil
 	}
+
 	pc := reflect.New(v).Interface().(ProxyConfigurer)
+
 	pc.GetBaseConfig().Type = string(proxyType)
+
 	return pc
 }
 
@@ -293,7 +446,9 @@ func (c *TCPProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 
 func (c *TCPProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	return &out
 }
 
@@ -319,26 +474,37 @@ func (c *UDPProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 
 func (c *UDPProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	return &out
 }
 
-func (c *UDPProxyConfig) GetRemotePort() int  { return c.RemotePort }
+func (c *UDPProxyConfig) GetRemotePort() int { return c.RemotePort }
+
 func (c *UDPProxyConfig) SetRemotePort(p int) { c.RemotePort = p }
 
 var _ ProxyConfigurer = &TCPUDPProxyConfig{}
 
 // TCPUDPProxyConfig is a merged public-port proxy that exposes BOTH a TCP and a
+
 // UDP service on the SAME RemotePort of frps (e.g. RDP's TCP 3389 + UDP 3389),
+
 // registered as a single proxy on both frpc and frps. LocalPort is the TCP local
+
 // service port; LocalPortUDP is the UDP local service port and defaults to
+
 // LocalPort when zero. It is a real relay type (not sugar) — the server opens one
+
 // TCP listener and one UDP listener, and each work connection is tagged with its
+
 // protocol so a single client-side proxy routes it to the right local service.
+
 type TCPUDPProxyConfig struct {
 	ProxyBaseConfig
 
-	RemotePort   int `json:"remotePort,omitempty"`
+	RemotePort int `json:"remotePort,omitempty"`
+
 	LocalPortUDP int `json:"localPortUDP,omitempty"`
 }
 
@@ -356,7 +522,9 @@ func (c *TCPUDPProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 
 func (c *TCPUDPProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	return &out
 }
 
@@ -364,28 +532,43 @@ var _ ProxyConfigurer = &HTTPProxyConfig{}
 
 type HTTPProxyConfig struct {
 	ProxyBaseConfig
+
 	DomainConfig
 
-	Locations         []string         `json:"locations,omitempty"`
-	HTTPUser          string           `json:"httpUser,omitempty"`
-	HTTPPassword      string           `json:"httpPassword,omitempty"`
-	HostHeaderRewrite string           `json:"hostHeaderRewrite,omitempty"`
-	RequestHeaders    HeaderOperations `json:"requestHeaders,omitempty"`
-	ResponseHeaders   HeaderOperations `json:"responseHeaders,omitempty"`
-	RouteByHTTPUser   string           `json:"routeByHTTPUser,omitempty"`
+	Locations []string `json:"locations,omitempty"`
+
+	HTTPUser string `json:"httpUser,omitempty"`
+
+	HTTPPassword string `json:"httpPassword,omitempty"`
+
+	HostHeaderRewrite string `json:"hostHeaderRewrite,omitempty"`
+
+	RequestHeaders HeaderOperations `json:"requestHeaders,omitempty"`
+
+	ResponseHeaders HeaderOperations `json:"responseHeaders,omitempty"`
+
+	RouteByHTTPUser string `json:"routeByHTTPUser,omitempty"`
 }
 
 func (c *HTTPProxyConfig) MarshalToMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.MarshalToMsg(m)
 
 	m.CustomDomains = c.CustomDomains
+
 	m.SubDomain = c.SubDomain
+
 	m.Locations = c.Locations
+
 	m.HostHeaderRewrite = c.HostHeaderRewrite
+
 	m.HTTPUser = c.HTTPUser
+
 	m.HTTPPwd = c.HTTPPassword
+
 	m.Headers = c.RequestHeaders.Set
+
 	m.ResponseHeaders = c.ResponseHeaders.Set
+
 	m.RouteByHTTPUser = c.RouteByHTTPUser
 }
 
@@ -393,23 +576,37 @@ func (c *HTTPProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.UnmarshalFromMsg(m)
 
 	c.CustomDomains = m.CustomDomains
+
 	c.SubDomain = m.SubDomain
+
 	c.Locations = m.Locations
+
 	c.HostHeaderRewrite = m.HostHeaderRewrite
+
 	c.HTTPUser = m.HTTPUser
+
 	c.HTTPPassword = m.HTTPPwd
+
 	c.RequestHeaders.Set = m.Headers
+
 	c.ResponseHeaders.Set = m.ResponseHeaders
+
 	c.RouteByHTTPUser = m.RouteByHTTPUser
 }
 
 func (c *HTTPProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	out.DomainConfig = c.DomainConfig.Clone()
+
 	out.Locations = slices.Clone(c.Locations)
+
 	out.RequestHeaders = c.RequestHeaders.Clone()
+
 	out.ResponseHeaders = c.ResponseHeaders.Clone()
+
 	return &out
 }
 
@@ -417,6 +614,7 @@ var _ ProxyConfigurer = &HTTPSProxyConfig{}
 
 type HTTPSProxyConfig struct {
 	ProxyBaseConfig
+
 	DomainConfig
 }
 
@@ -424,6 +622,7 @@ func (c *HTTPSProxyConfig) MarshalToMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.MarshalToMsg(m)
 
 	m.CustomDomains = c.CustomDomains
+
 	m.SubDomain = c.SubDomain
 }
 
@@ -431,33 +630,49 @@ func (c *HTTPSProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.UnmarshalFromMsg(m)
 
 	c.CustomDomains = m.CustomDomains
+
 	c.SubDomain = m.SubDomain
 }
 
 func (c *HTTPSProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	out.DomainConfig = c.DomainConfig.Clone()
+
 	return &out
 }
 
 var _ ProxyConfigurer = &MCProxyConfig{}
 
 // MCProxyConfig routes Minecraft (Java Edition) traffic by the "server address"
+
 // sent in the client's first handshake packet — the hostname the player typed —
+
 // exactly the way HTTPS proxies route by TLS SNI. Many Minecraft servers can
+
 // share a single public frps port (minecraftBindPort): frps reads the
+
 // handshake, matches CustomDomains/SubDomain, and forwards the intact stream to
+
 // the frpc that registered that hostname. Inspired by the standalone
+
 // mc-gateway project.
+
 type MCProxyConfig struct {
 	ProxyBaseConfig
+
 	DomainConfig
 
 	// RemotePort is the public Minecraft port that frps opens for this proxy.
+
 	// It is declared client-side (no frps configuration needed); multiple mc
+
 	// proxies that share the same RemotePort share one listener and are routed
+
 	// by the handshake hostname.
+
 	RemotePort int `json:"remotePort,omitempty"`
 }
 
@@ -465,7 +680,9 @@ func (c *MCProxyConfig) MarshalToMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.MarshalToMsg(m)
 
 	m.CustomDomains = c.CustomDomains
+
 	m.SubDomain = c.SubDomain
+
 	m.RemotePort = c.RemotePort
 }
 
@@ -473,35 +690,53 @@ func (c *MCProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.UnmarshalFromMsg(m)
 
 	c.CustomDomains = m.CustomDomains
+
 	c.SubDomain = m.SubDomain
+
 	c.RemotePort = m.RemotePort
 }
 
 func (c *MCProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	out.DomainConfig = c.DomainConfig.Clone()
+
 	return &out
 }
 
 var _ ProxyConfigurer = &PEProxyConfig{}
 
 // PEProxyConfig routes Minecraft: Bedrock Edition (UDP/RakNet) traffic to a
+
 // backend chosen by the hostname the player typed. Unlike the Java "mc" type,
+
 // Bedrock carries that hostname only inside the login packet (after the RakNet
+
 // handshake), so frps cannot peek it. Instead frpc runs a full Bedrock router
+
 // (gophertunnel) that terminates each connection, reads the login ServerAddress,
+
 // and re-originates to the matching local server in ForcedHosts. On the wire
+
 // frps treats this exactly like a "udp" proxy: it opens RemotePort and tunnels
+
 // datagrams to frpc, which feeds them to the local router. Inspired by
+
 // WaterdogPE forced_hosts. Backends must run in offline / trust-proxy mode.
+
 type PEProxyConfig struct {
 	ProxyBaseConfig
 
 	// RemotePort is the public UDP port frps opens (e.g. 19132).
+
 	RemotePort int `json:"remotePort,omitempty"`
+
 	// ForcedHosts maps the hostname a player connects with to a local backend
+
 	// Bedrock server address ("ip:port"). Used only on frpc (frps never sees it).
+
 	ForcedHosts map[string]string `json:"forcedHosts,omitempty"`
 }
 
@@ -519,15 +754,22 @@ func (c *PEProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 
 func (c *PEProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	if c.ForcedHosts != nil {
+
 		out.ForcedHosts = make(map[string]string, len(c.ForcedHosts))
+
 		maps.Copy(out.ForcedHosts, c.ForcedHosts)
+
 	}
+
 	return &out
 }
 
-func (c *PEProxyConfig) GetRemotePort() int  { return c.RemotePort }
+func (c *PEProxyConfig) GetRemotePort() int { return c.RemotePort }
+
 func (c *PEProxyConfig) SetRemotePort(p int) { c.RemotePort = p }
 
 type TCPMultiplexerType string
@@ -540,22 +782,31 @@ var _ ProxyConfigurer = &TCPMuxProxyConfig{}
 
 type TCPMuxProxyConfig struct {
 	ProxyBaseConfig
+
 	DomainConfig
 
-	HTTPUser        string `json:"httpUser,omitempty"`
-	HTTPPassword    string `json:"httpPassword,omitempty"`
+	HTTPUser string `json:"httpUser,omitempty"`
+
+	HTTPPassword string `json:"httpPassword,omitempty"`
+
 	RouteByHTTPUser string `json:"routeByHTTPUser,omitempty"`
-	Multiplexer     string `json:"multiplexer,omitempty"`
+
+	Multiplexer string `json:"multiplexer,omitempty"`
 }
 
 func (c *TCPMuxProxyConfig) MarshalToMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.MarshalToMsg(m)
 
 	m.CustomDomains = c.CustomDomains
+
 	m.SubDomain = c.SubDomain
+
 	m.Multiplexer = c.Multiplexer
+
 	m.HTTPUser = c.HTTPUser
+
 	m.HTTPPwd = c.HTTPPassword
+
 	m.RouteByHTTPUser = c.RouteByHTTPUser
 }
 
@@ -563,17 +814,25 @@ func (c *TCPMuxProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.UnmarshalFromMsg(m)
 
 	c.CustomDomains = m.CustomDomains
+
 	c.SubDomain = m.SubDomain
+
 	c.Multiplexer = m.Multiplexer
+
 	c.HTTPUser = m.HTTPUser
+
 	c.HTTPPassword = m.HTTPPwd
+
 	c.RouteByHTTPUser = m.RouteByHTTPUser
 }
 
 func (c *TCPMuxProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	out.DomainConfig = c.DomainConfig.Clone()
+
 	return &out
 }
 
@@ -582,7 +841,8 @@ var _ ProxyConfigurer = &STCPProxyConfig{}
 type STCPProxyConfig struct {
 	ProxyBaseConfig
 
-	Secretkey  string   `json:"secretKey,omitempty"`
+	Secretkey string `json:"secretKey,omitempty"`
+
 	AllowUsers []string `json:"allowUsers,omitempty"`
 }
 
@@ -590,6 +850,7 @@ func (c *STCPProxyConfig) MarshalToMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.MarshalToMsg(m)
 
 	m.Sk = c.Secretkey
+
 	m.AllowUsers = c.AllowUsers
 }
 
@@ -597,13 +858,17 @@ func (c *STCPProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.UnmarshalFromMsg(m)
 
 	c.Secretkey = m.Sk
+
 	c.AllowUsers = m.AllowUsers
 }
 
 func (c *STCPProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	out.AllowUsers = slices.Clone(c.AllowUsers)
+
 	return &out
 }
 
@@ -612,10 +877,12 @@ var _ ProxyConfigurer = &XTCPProxyConfig{}
 type XTCPProxyConfig struct {
 	ProxyBaseConfig
 
-	Secretkey  string   `json:"secretKey,omitempty"`
+	Secretkey string `json:"secretKey,omitempty"`
+
 	AllowUsers []string `json:"allowUsers,omitempty"`
 
 	// NatTraversal configuration for NAT traversal
+
 	NatTraversal *NatTraversalConfig `json:"natTraversal,omitempty"`
 }
 
@@ -623,6 +890,7 @@ func (c *XTCPProxyConfig) MarshalToMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.MarshalToMsg(m)
 
 	m.Sk = c.Secretkey
+
 	m.AllowUsers = c.AllowUsers
 }
 
@@ -630,28 +898,37 @@ func (c *XTCPProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.UnmarshalFromMsg(m)
 
 	c.Secretkey = m.Sk
+
 	c.AllowUsers = m.AllowUsers
 }
 
 func (c *XTCPProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	out.AllowUsers = slices.Clone(c.AllowUsers)
+
 	out.NatTraversal = c.NatTraversal.Clone()
+
 	return &out
 }
 
 var _ ProxyConfigurer = &XUDPProxyConfig{}
 
 // XUDPProxyConfig is the provider side of a UDP proxy that reaches the visitor
+
 // via NAT hole punching (the UDP counterpart of XTCPProxyConfig).
+
 type XUDPProxyConfig struct {
 	ProxyBaseConfig
 
-	Secretkey  string   `json:"secretKey,omitempty"`
+	Secretkey string `json:"secretKey,omitempty"`
+
 	AllowUsers []string `json:"allowUsers,omitempty"`
 
 	// NatTraversal configuration for NAT traversal
+
 	NatTraversal *NatTraversalConfig `json:"natTraversal,omitempty"`
 }
 
@@ -659,6 +936,7 @@ func (c *XUDPProxyConfig) MarshalToMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.MarshalToMsg(m)
 
 	m.Sk = c.Secretkey
+
 	m.AllowUsers = c.AllowUsers
 }
 
@@ -666,32 +944,45 @@ func (c *XUDPProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.UnmarshalFromMsg(m)
 
 	c.Secretkey = m.Sk
+
 	c.AllowUsers = m.AllowUsers
 }
 
 func (c *XUDPProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	out.AllowUsers = slices.Clone(c.AllowUsers)
+
 	out.NatTraversal = c.NatTraversal.Clone()
+
 	return &out
 }
 
 var _ ProxyConfigurer = &XTCPXUDPProxyConfig{}
 
 // XTCPXUDPProxyConfig is the provider side of a combined proxy that carries BOTH
+
 // TCP and UDP to a local service over a SINGLE NAT hole (tailscale-style), using
+
 // tagged tunnel streams. LocalPort is the TCP service port; LocalPortUDP is the
+
 // UDP service port and defaults to LocalPort when zero (so RDP's TCP 3389 + UDP
+
 // 3389 need only LocalPort).
+
 type XTCPXUDPProxyConfig struct {
 	ProxyBaseConfig
 
-	Secretkey    string   `json:"secretKey,omitempty"`
-	AllowUsers   []string `json:"allowUsers,omitempty"`
-	LocalPortUDP int      `json:"localPortUDP,omitempty"`
+	Secretkey string `json:"secretKey,omitempty"`
+
+	AllowUsers []string `json:"allowUsers,omitempty"`
+
+	LocalPortUDP int `json:"localPortUDP,omitempty"`
 
 	// NatTraversal configuration for NAT traversal
+
 	NatTraversal *NatTraversalConfig `json:"natTraversal,omitempty"`
 }
 
@@ -699,6 +990,7 @@ func (c *XTCPXUDPProxyConfig) MarshalToMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.MarshalToMsg(m)
 
 	m.Sk = c.Secretkey
+
 	m.AllowUsers = c.AllowUsers
 }
 
@@ -706,14 +998,19 @@ func (c *XTCPXUDPProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.UnmarshalFromMsg(m)
 
 	c.Secretkey = m.Sk
+
 	c.AllowUsers = m.AllowUsers
 }
 
 func (c *XTCPXUDPProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	out.AllowUsers = slices.Clone(c.AllowUsers)
+
 	out.NatTraversal = c.NatTraversal.Clone()
+
 	return &out
 }
 
@@ -722,7 +1019,8 @@ var _ ProxyConfigurer = &SUDPProxyConfig{}
 type SUDPProxyConfig struct {
 	ProxyBaseConfig
 
-	Secretkey  string   `json:"secretKey,omitempty"`
+	Secretkey string `json:"secretKey,omitempty"`
+
 	AllowUsers []string `json:"allowUsers,omitempty"`
 }
 
@@ -730,6 +1028,7 @@ func (c *SUDPProxyConfig) MarshalToMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.MarshalToMsg(m)
 
 	m.Sk = c.Secretkey
+
 	m.AllowUsers = c.AllowUsers
 }
 
@@ -737,38 +1036,53 @@ func (c *SUDPProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.UnmarshalFromMsg(m)
 
 	c.Secretkey = m.Sk
+
 	c.AllowUsers = m.AllowUsers
 }
 
 func (c *SUDPProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	out.AllowUsers = slices.Clone(c.AllowUsers)
+
 	return &out
 }
 
 var _ ProxyConfigurer = &STCPSUDPProxyConfig{}
 
 // STCPSUDPProxyConfig is the provider side of a merged secret proxy that carries
+
 // BOTH TCP and UDP to a local service through the frps relay (no public port),
+
 // registered as a single proxy. Like stcp/sudp it is reached via a matching
+
 // visitor holding the same secret key. On the frps side it is one secret listener
+
 // (identical to stcp/sudp); the TCP/UDP split lives entirely on the client, where
+
 // every relayed stream is prefixed with a 1-byte tag. LocalPort is the TCP local
+
 // service port; LocalPortUDP is the UDP local service port and defaults to
+
 // LocalPort when zero.
+
 type STCPSUDPProxyConfig struct {
 	ProxyBaseConfig
 
-	Secretkey    string   `json:"secretKey,omitempty"`
-	AllowUsers   []string `json:"allowUsers,omitempty"`
-	LocalPortUDP int      `json:"localPortUDP,omitempty"`
+	Secretkey string `json:"secretKey,omitempty"`
+
+	AllowUsers []string `json:"allowUsers,omitempty"`
+
+	LocalPortUDP int `json:"localPortUDP,omitempty"`
 }
 
 func (c *STCPSUDPProxyConfig) MarshalToMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.MarshalToMsg(m)
 
 	m.Sk = c.Secretkey
+
 	m.AllowUsers = c.AllowUsers
 }
 
@@ -776,12 +1090,16 @@ func (c *STCPSUDPProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.UnmarshalFromMsg(m)
 
 	c.Secretkey = m.Sk
+
 	c.AllowUsers = m.AllowUsers
 }
 
 func (c *STCPSUDPProxyConfig) Clone() ProxyConfigurer {
 	out := *c
+
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+
 	out.AllowUsers = slices.Clone(c.AllowUsers)
+
 	return &out
 }

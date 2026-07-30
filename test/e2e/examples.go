@@ -15,15 +15,23 @@ var _ = ginkgo.Describe("[Feature: Example]", func() {
 	ginkgo.Describe("TCP", func() {
 		ginkgo.It("Expose a TCP echo server", func() {
 			serverConf := consts.DefaultServerConfig
+
 			clientConf := consts.DefaultClientConfig
 
 			remotePort := f.AllocPort()
+
 			clientConf += fmt.Sprintf(`
+
 			[[proxies]]
+
 			name = "tcp"
+
 			type = "tcp"
+
 			localPort = {{ .%s }}
+
 			remotePort = %d
+
 			`, framework.TCPEchoServerPort, remotePort)
 
 			f.RunProcesses(serverConf, []string{clientConf})

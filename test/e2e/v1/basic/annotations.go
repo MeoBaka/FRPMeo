@@ -19,20 +19,31 @@ var _ = ginkgo.Describe("[Feature: Annotations]", func() {
 		webPort := f.AllocPort()
 
 		serverConf := consts.DefaultServerConfig + fmt.Sprintf(`
+
 		webServer.port = %d
+
 		`, webPort)
 
 		p1Port := f.AllocPort()
 
 		clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+
 		[[proxies]]
+
 		name = "p1"
+
 		type = "tcp"
+
 		localPort = {{ .%s }}
+
 		remotePort = %d
+
 		[proxies.annotations]
+
 		"frp.e2e.test/foo" = "value1"
+
 		"frp.e2e.test/bar" = "value2"
+
 		`, framework.TCPEchoServerPort, p1Port)
 
 		f.RunProcesses(serverConf, []string{clientConf})
@@ -40,15 +51,23 @@ var _ = ginkgo.Describe("[Feature: Annotations]", func() {
 		framework.NewRequestExpect(f).Port(p1Port).Ensure()
 
 		// check annotations in frps
+
 		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/proxy/tcp/%s", webPort, "p1"))
+
 		framework.ExpectNoError(err)
+
 		framework.ExpectEqual(resp.StatusCode, 200)
+
 		defer resp.Body.Close()
+
 		content, err := io.ReadAll(resp.Body)
+
 		framework.ExpectNoError(err)
 
 		annotations := gjson.Get(string(content), "conf.annotations").Map()
+
 		framework.ExpectEqual("value1", annotations["frp.e2e.test/foo"].String())
+
 		framework.ExpectEqual("value2", annotations["frp.e2e.test/bar"].String())
 	})
 })

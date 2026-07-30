@@ -36,6 +36,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -84,6 +85,11 @@ type ProviderConfig struct {
 	Body        string            `json:"body,omitempty"`
 	Headers     map[string]string `json:"headers,omitempty"`
 	BlockedPath string            `json:"blockedPath,omitempty"` // e.g. results.0.blacklisted
+	// ReasonPath optionally points at a string the provider returns to say why
+	// an IP is blocked, e.g. results.0.reason. It only reaches the log, so a
+	// provider that does not answer with one costs nothing: the rejection is
+	// still reported, just as a bare "reputation".
+	ReasonPath string `json:"reasonPath,omitempty"`
 
 	// common
 	CacheTTLSec int  `json:"cacheTTLSec,omitempty"` // per-ip cache (default 300)
@@ -104,6 +110,10 @@ func (p ProviderConfig) effective() ProviderConfig {
 		Body:        `{"ips":["{ip}"]}`,
 		Headers:     map[string]string{"X-API-Key": p.FRPControlAPIKey},
 		BlockedPath: "results.0.blacklisted",
+		// Read alongside the verdict when the service returns it. Absent, the
+		// rejection reads as a plain "reputation" - no configuration needed
+		// either way.
+		ReasonPath:  "results.0.reason",
 		CacheTTLSec: p.CacheTTLSec,
 		TimeoutMs:   p.TimeoutMs,
 		FailOpen:    p.FailOpen,
@@ -111,25 +121,167 @@ func (p ProviderConfig) effective() ProviderConfig {
 	}
 }
 
+// compiledRule is a Rule with its CIDR and port spec already parsed.
+//
+// Rules change rarely and are matched on every user connection - on every
+// packet for udp - so the parsing happens when the rule arrives rather than
+// when traffic does. What is left on the hot path is a prefix comparison and a
+// few integer comparisons, and nothing on it reaches the heap.
+type compiledRule struct {
+	Rule
+
+	allow   bool
+	anyCIDR bool
+	prefix  netip.Prefix
+	anyPort bool
+	ports   []portRange
+	// reason is what Allow reports when this rule decides, built here so that
+	// deciding does not have to build a string.
+	reason string
+	// never marks a CIDR that does not parse. Such a rule matches nothing,
+	// which is what the old string matcher did with it as well: a rule that
+	// visibly does nothing beats a deny that quietly widens to everything.
+	never bool
+}
+
+// portRange is one entry of a compiled port spec, inclusive at both ends.
+type portRange struct{ lo, hi int }
+
+// ruleReason names a rule in the line that reports a rejection. Rules created
+// through the API always carry an id, but a hand-written state file need not,
+// and a log entry trailing off after "reason: rule " names nothing at all - so
+// a rule without one is identified by where it sits in the list.
+func ruleReason(id string, index int) string {
+	if id = strings.TrimSpace(id); id != "" {
+		return "rule " + id
+	}
+	return "rule #" + strconv.Itoa(index+1)
+}
+
+func compileRules(rules []Rule) []compiledRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]compiledRule, 0, len(rules))
+	for i, r := range rules {
+		out = append(out, compileRule(r, i))
+	}
+	return out
+}
+
+func compileRule(r Rule, index int) compiledRule {
+	c := compiledRule{
+		Rule:   r,
+		allow:  strings.EqualFold(strings.TrimSpace(r.Action), "allow"),
+		reason: ruleReason(r.ID, index),
+	}
+
+	cidr := strings.TrimSpace(r.CIDR)
+	switch {
+	case cidr == "" || cidr == "*":
+		c.anyCIDR = true
+	case strings.Contains(cidr, "/"):
+		p, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			c.never = true
+			break
+		}
+		if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
+			// "::ffff:1.2.3.0/120" names an IPv4 network. Hold it in the form
+			// addresses are matched in, or it would match none of them.
+			p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
+		}
+		c.prefix = p.Masked()
+	default:
+		addr, err := netip.ParseAddr(cidr)
+		if err != nil {
+			c.never = true
+			break
+		}
+		addr = addr.Unmap()
+		c.prefix = netip.PrefixFrom(addr, addr.BitLen())
+	}
+
+	c.ports, c.anyPort = compilePorts(r.Port)
+	return c
+}
+
+// compilePorts reads a port spec into the ranges it names. A malformed entry is
+// dropped rather than widened, so a spec naming nothing valid matches nothing -
+// see matchPort's old contract, which this keeps.
+func compilePorts(spec string) (ranges []portRange, anyPort bool) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" || spec == "*" || strings.EqualFold(spec, "all") {
+		return nil, true
+	}
+	for part := range strings.SplitSeq(spec, ",") {
+		if lo, hi, ok := parsePortRange(part); ok {
+			ranges = append(ranges, portRange{lo: lo, hi: hi})
+		}
+	}
+	return ranges, false
+}
+
+func (c *compiledRule) match(ip netip.Addr, port int) bool {
+	if c.never {
+		return false
+	}
+	if !c.anyCIDR && (!ip.IsValid() || !c.prefix.Contains(ip)) {
+		return false
+	}
+	return c.anyPort || matchRanges(c.ports, port)
+}
+
+func matchRanges(ranges []portRange, port int) bool {
+	for _, r := range ranges {
+		if port >= r.lo && port <= r.hi {
+			return true
+		}
+	}
+	return false
+}
+
+// plainRules unwraps compiled rules back into what the dashboard and the state
+// file speak in.
+func plainRules(rules []compiledRule) []Rule {
+	out := make([]Rule, len(rules))
+	for i := range rules {
+		out[i] = rules[i].Rule
+	}
+	return out
+}
+
 type state struct {
 	Enabled     *bool          `json:"enabled,omitempty"` // nil = enabled
 	ControlPort bool           `json:"controlPort"`
+	WebPort     bool           `json:"webPort"`
 	Default     string         `json:"default"`
 	Rules       []Rule         `json:"rules"`
 	Provider    ProviderConfig `json:"provider"`
 }
 
-// Snapshot is returned to the dashboard.
-type Snapshot struct {
-	Enabled     bool           `json:"enabled"`
-	ControlPort bool           `json:"controlPort"`
-	Default     string         `json:"default"`
-	Rules       []Rule         `json:"rules"`
-	Provider    ProviderConfig `json:"provider"`
+// Config is the whole of what the firewall is told, and the whole of what it
+// reports back. One type for both directions rather than a list of arguments:
+// three of the fields are booleans, and a caller that swapped two of them would
+// turn a protected port into an open one without the compiler noticing.
+type Config struct {
+	Enabled bool `json:"enabled"`
+	// ControlPort also covers the ssh tunnel gateway: both are how a client
+	// reaches frps, both lock every client out if a deny default reaches them,
+	// so both answer to one switch.
+	ControlPort bool `json:"controlPort"`
+	// WebPort protects the dashboard. Off by default, and deliberately so: the
+	// dashboard is where these rules are written, and a rule that shuts it can
+	// only be undone by editing the state file on the host and restarting.
+	WebPort  bool           `json:"webPort"`
+	Default  string         `json:"default"`
+	Rules    []Rule         `json:"rules"`
+	Provider ProviderConfig `json:"provider"`
 }
 
 type repEntry struct {
 	blocked bool
+	reason  string
 	exp     int64
 }
 
@@ -141,8 +293,9 @@ type Firewall struct {
 
 	enabled     bool
 	controlPort bool
+	webPort     bool
 	def         string
-	rules       []Rule
+	rules       []compiledRule
 	provider    ProviderConfig
 	client      *http.Client
 
@@ -181,8 +334,9 @@ func New(path string) (*Firewall, error) {
 		}
 		f.enabled = s.Enabled == nil || *s.Enabled
 		f.controlPort = s.ControlPort
+		f.webPort = s.WebPort
 		f.def = orDefault(strings.ToLower(s.Default), "allow")
-		f.rules = s.Rules
+		f.rules = compileRules(s.Rules)
 		f.provider = s.Provider
 	case os.IsNotExist(err):
 	default:
@@ -228,8 +382,30 @@ func (f *Firewall) AllowControl(remoteAddr string, port int) (bool, string) {
 	return f.Allow(remoteAddr, port)
 }
 
+// AllowWeb decides whether a peer may reach the dashboard, checked on accept
+// and so before the TLS handshake - a scanner speaking to the wrong protocol
+// never gets far enough to be told so.
+//
+// Opt-in via the webPort toggle, and for a sharper reason than the control
+// port's: the dashboard is where these rules are written. A rule that shuts it
+// can only be undone by editing the state file on the host and restarting, so
+// nobody is given that footgun without asking for it.
+func (f *Firewall) AllowWeb(remoteAddr string, port int) (bool, string) {
+	f.mu.RLock()
+	on := f.enabled && f.webPort
+	f.mu.RUnlock()
+	if !on {
+		return true, "web port not protected"
+	}
+	return f.Allow(remoteAddr, port)
+}
+
 // Allow decides whether a user connection is permitted. port is the frps-side
 // port the connection arrived on.
+//
+// The reason is never empty, whichever way the decision goes: callers put it
+// straight into a log line, and one that ends at "reason:" would say less than
+// no line at all.
 func (f *Firewall) Allow(remoteAddr string, port int) (bool, string) {
 	f.mu.RLock()
 	if !f.enabled {
@@ -237,34 +413,41 @@ func (f *Firewall) Allow(remoteAddr string, port int) (bool, string) {
 		return true, "firewall disabled"
 	}
 	now := f.nowFn()
-	ip := parseIP(remoteAddr)
+	ip := parseAddr(remoteAddr)
 
 	// 1) manual rules, in order
-	for _, r := range f.rules {
+	for i := range f.rules {
+		r := &f.rules[i]
 		if r.ExpiresAt != 0 && r.ExpiresAt <= now {
 			continue
 		}
-		if matchCIDR(r.CIDR, ip) && matchPort(r.Port, port) {
-			allow := strings.ToLower(r.Action) == "allow"
+		if r.match(ip, port) {
+			allow, reason := r.allow, r.reason
 			f.mu.RUnlock()
-			return allow, "rule " + r.ID
+			return allow, reason
 		}
 	}
 	provider := f.provider
 	client := f.client
 	def := f.def
-	selfCall := ip != nil && f.isSelfCall(ip, port)
+	selfCall := ip.IsValid() && f.isSelfCall(ip, port)
 	f.mu.RUnlock()
 
 	// 2) external reputation provider for unknown IPs. Our own call out to the
 	// provider is exempt: it is the query, not something to run a query on.
-	if (provider.Mode == "frpcontrol" || provider.Mode == "custom") && ip != nil && !selfCall {
-		if f.checkExternal(ip.String(), provider.effective(), client) {
+	if (provider.Mode == "frpcontrol" || provider.Mode == "custom") && ip.IsValid() && !selfCall {
+		if blocked, why := f.checkExternal(ip.String(), provider.effective(), client); blocked {
+			if why != "" {
+				return false, "reputation (" + why + ")"
+			}
 			return false, "reputation"
 		}
 	}
 	// 3) default policy
-	return def == "allow", "default " + def
+	if def == "allow" {
+		return true, "default allow"
+	}
+	return false, "default deny"
 }
 
 // checkExternal returns whether ip is blocked according to the provider,
@@ -274,13 +457,13 @@ func (f *Firewall) Allow(remoteAddr string, port int) (bool, string) {
 // written once an answer comes back, so without this a burst of connections
 // from one unknown IP would all miss and each fire its own request - turning
 // one visitor into a stampede against the provider.
-func (f *Firewall) checkExternal(ipStr string, p ProviderConfig, client *http.Client) bool {
+func (f *Firewall) checkExternal(ipStr string, p ProviderConfig, client *http.Client) (bool, string) {
 	for {
 		now := f.nowFn()
 		f.repMu.Lock()
 		if e, ok := f.repCache[ipStr]; ok && e.exp > now {
 			f.repMu.Unlock()
-			return e.blocked
+			return e.blocked, e.reason
 		}
 		if ch, ok := f.repInFlight[ipStr]; ok {
 			// Someone is already asking about this IP. Wait for their answer
@@ -293,27 +476,30 @@ func (f *Firewall) checkExternal(ipStr string, p ProviderConfig, client *http.Cl
 		f.repInFlight[ipStr] = ch
 		f.repMu.Unlock()
 
-		blocked, err := queryProvider(ipStr, p, client)
+		blocked, reason, err := queryProvider(ipStr, p, client)
 		ttl := int64(p.CacheTTLSec)
 		if ttl <= 0 {
 			ttl = 300
 		}
 		if err != nil {
 			blocked = !p.FailOpen // fail-closed by default
-			ttl = 10              // don't hammer a failing provider
+			reason = "provider unavailable"
+			ttl = 10 // don't hammer a failing provider
 		}
 		f.repMu.Lock()
-		f.repCache[ipStr] = repEntry{blocked: blocked, exp: now + ttl}
+		f.repCache[ipStr] = repEntry{blocked: blocked, reason: reason, exp: now + ttl}
 		delete(f.repInFlight, ipStr)
 		f.repMu.Unlock()
 		close(ch) // wakes the waiters, which now find the cache filled
-		return blocked
+		return blocked, reason
 	}
 }
 
-func queryProvider(ipStr string, p ProviderConfig, client *http.Client) (bool, error) {
+// queryProvider asks the provider about one IP and reports its verdict, plus
+// whatever reason it gave for it.
+func queryProvider(ipStr string, p ProviderConfig, client *http.Client) (bool, string, error) {
 	if p.URL == "" || p.BlockedPath == "" {
-		return false, errors.New("provider url/blockedPath not set")
+		return false, "", errors.New("provider url/blockedPath not set")
 	}
 	method := strings.ToUpper(strings.TrimSpace(p.Method))
 	if method == "" {
@@ -332,7 +518,7 @@ func queryProvider(ipStr string, p ProviderConfig, client *http.Client) (bool, e
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	if method == "POST" {
 		req.Header.Set("Content-Type", "application/json")
@@ -345,21 +531,50 @@ func queryProvider(ipStr string, p ProviderConfig, client *http.Client) (bool, e
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("provider status %d", resp.StatusCode)
+		return false, "", fmt.Errorf("provider status %d", resp.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	var data any
 	if err := json.Unmarshal(raw, &data); err != nil {
-		return false, err
+		return false, "", err
 	}
-	return truthy(extractPath(data, p.BlockedPath, ipStr)), nil
+	blocked := truthy(extractPath(data, p.BlockedPath, ipStr))
+	reason := ""
+	if blocked && p.ReasonPath != "" {
+		if s, ok := extractPath(data, p.ReasonPath, ipStr).(string); ok {
+			reason = cleanReason(s)
+		}
+	}
+	return blocked, reason, nil
+}
+
+// cleanReason makes a provider's answer safe to log. The string comes from
+// another service over the network, so it is trimmed to one short line: a
+// newline in it would otherwise let whoever runs that service write log entries
+// of their own choosing into ours.
+func cleanReason(s string) string {
+	const maxReasonLen = 64
+
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		if b.Len() >= maxReasonLen {
+			break
+		}
+		// Anything below space - newline, carriage return, the terminal escapes
+		// that color our own output - becomes a space.
+		if r < ' ' || r == 0x7f {
+			r = ' '
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // extractPath walks a dot path (keys + numeric array indices, "{ip}" allowed).
@@ -399,29 +614,32 @@ func truthy(v any) bool {
 }
 
 // Snapshot returns the current state for the dashboard.
-func (f *Firewall) Snapshot() Snapshot {
+func (f *Firewall) Snapshot() Config {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	rules := make([]Rule, len(f.rules))
-	copy(rules, f.rules)
-	return Snapshot{Enabled: f.enabled, ControlPort: f.controlPort, Default: f.def, Rules: rules, Provider: f.provider}
+	return Config{
+		Enabled: f.enabled, ControlPort: f.controlPort, WebPort: f.webPort,
+		Default: f.def, Rules: plainRules(f.rules), Provider: f.provider,
+	}
 }
 
-// SetConfig replaces enabled/controlPort/default/rules/provider.
-func (f *Firewall) SetConfig(enabled, controlPort bool, def string, rules []Rule, provider ProviderConfig) error {
-	def = strings.ToLower(def)
+// SetConfig replaces the whole configuration.
+func (f *Firewall) SetConfig(c Config) error {
+	def := strings.ToLower(c.Default)
 	if def != "allow" && def != "deny" {
 		def = "allow"
 	}
+	provider := c.Provider
 	if provider.Mode == "" {
 		provider.Mode = "off"
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.enabled = enabled
-	f.controlPort = controlPort
+	f.enabled = c.Enabled
+	f.controlPort = c.ControlPort
+	f.webPort = c.WebPort
 	f.def = def
-	f.rules = rules
+	f.rules = compileRules(c.Rules)
 	f.provider = provider
 	f.buildClientLocked()
 	f.repMu.Lock()
@@ -474,7 +692,7 @@ func (f *Firewall) resolveSelfProviderLocked() {
 // attacker cannot forge this - completing a TCP handshake from a spoofed local
 // address needs to be on the path already, at which point the host is lost
 // anyway.
-func (f *Firewall) isSelfCall(ip net.IP, port int) bool {
+func (f *Firewall) isSelfCall(ip netip.Addr, port int) bool {
 	return f.selfProviderPort != 0 && port == f.selfProviderPort && f.localIPs[ip.String()]
 }
 
@@ -498,7 +716,10 @@ func (f *Firewall) saveLocked() error {
 		return nil
 	}
 	enabled := f.enabled
-	s := state{Enabled: &enabled, ControlPort: f.controlPort, Default: f.def, Rules: f.rules, Provider: f.provider}
+	s := state{
+		Enabled: &enabled, ControlPort: f.controlPort, WebPort: f.webPort,
+		Default: f.def, Rules: plainRules(f.rules), Provider: f.provider,
+	}
 	if s.Rules == nil {
 		s.Rules = []Rule{}
 	}
@@ -522,50 +743,21 @@ func orDefault(s, def string) string {
 	return s
 }
 
-func parseIP(remoteAddr string) net.IP {
+// parseAddr reads the source address of a connection. netip rather than net.IP:
+// an Addr is a value, so this allocates nothing on a path that runs for every
+// user connection and, for udp proxies, every packet.
+func parseAddr(remoteAddr string) netip.Addr {
 	host := remoteAddr
 	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		host = h
 	}
-	return net.ParseIP(strings.TrimSpace(host))
-}
-
-func matchCIDR(cidr string, ip net.IP) bool {
-	cidr = strings.TrimSpace(cidr)
-	if cidr == "" || cidr == "*" {
-		return true
-	}
-	if ip == nil {
-		return false
-	}
-	if !strings.Contains(cidr, "/") {
-		return ip.Equal(net.ParseIP(cidr))
-	}
-	_, n, err := net.ParseCIDR(cidr)
+	addr, err := netip.ParseAddr(strings.TrimSpace(host))
 	if err != nil {
-		return false
+		return netip.Addr{}
 	}
-	return n.Contains(ip)
-}
-
-// matchGlob supports a single '*' wildcard anywhere (prefix*, *suffix, a*b, *).
-// matchPort reports whether port satisfies a Windows-firewall style spec:
-// "" / "*" / "all" for any, otherwise a comma-separated list of single ports
-// and lo-hi ranges, e.g. "80,443,7000-7010". A malformed entry never matches,
-// so a typo cannot silently widen a deny rule into "any port"; ParsePortSpec
-// rejects it at the API instead.
-func matchPort(spec string, port int) bool {
-	spec = strings.TrimSpace(spec)
-	if spec == "" || spec == "*" || strings.EqualFold(spec, "all") {
-		return true
-	}
-	for part := range strings.SplitSeq(spec, ",") {
-		lo, hi, ok := parsePortRange(part)
-		if ok && port >= lo && port <= hi {
-			return true
-		}
-	}
-	return false
+	// An IPv4 client accepted on a dual-stack listener arrives as
+	// ::ffff:a.b.c.d. Unmapping it is what lets an IPv4 rule match it at all.
+	return addr.Unmap()
 }
 
 // parsePortRange reads one entry of a port spec: "6000" or "6000-6010".

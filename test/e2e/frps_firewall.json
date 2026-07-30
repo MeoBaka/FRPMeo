@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "controlPort": false,
+  "webPort": false,
+  "default": "allow",
+  "rules": [],
+  "provider": {
+    "mode": "off",
+    "failOpen": false
+  }
+}

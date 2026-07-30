@@ -9,7 +9,7 @@
 > (tcp, udp, http, https, tcpmux, stcp, sudp, xtcp, plugins, the basic dashboard, general
 > installation…) works exactly like the original — read the documentation at the link above.
 
-**Fork version:** `1.5.29.0.70.0.0 [DEV]` · **Branch:** `meobaka` (fork 1.5 on the upstream 0.70.0 line)
+**Fork version:** `1.7.40.0.70.0.0 [DEV]` · **Branch:** `meobaka` (fork 1.7 on the upstream 0.70.0 line)
 
 ---
 

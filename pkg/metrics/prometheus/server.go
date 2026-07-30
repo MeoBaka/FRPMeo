@@ -7,19 +7,25 @@ import (
 )
 
 const (
-	namespace       = "frp"
+	namespace = "frp"
+
 	serverSubsystem = "server"
 )
 
 var ServerMetrics metrics.ServerMetrics = newServerMetrics()
 
 type serverMetrics struct {
-	clientCount        prometheus.Gauge
-	proxyCount         *prometheus.GaugeVec
+	clientCount prometheus.Gauge
+
+	proxyCount *prometheus.GaugeVec
+
 	proxyCountDetailed *prometheus.GaugeVec
-	connectionCount    *prometheus.GaugeVec
-	trafficIn          *prometheus.CounterVec
-	trafficOut         *prometheus.CounterVec
+
+	connectionCount *prometheus.GaugeVec
+
+	trafficIn *prometheus.CounterVec
+
+	trafficOut *prometheus.CounterVec
 }
 
 func (m *serverMetrics) NewClient() {
@@ -32,11 +38,13 @@ func (m *serverMetrics) CloseClient() {
 
 func (m *serverMetrics) NewProxy(name string, proxyType string, _ string, _ string) {
 	m.proxyCount.WithLabelValues(proxyType).Inc()
+
 	m.proxyCountDetailed.WithLabelValues(proxyType, name).Inc()
 }
 
 func (m *serverMetrics) CloseProxy(name string, proxyType string) {
 	m.proxyCount.WithLabelValues(proxyType).Dec()
+
 	m.proxyCountDetailed.WithLabelValues(proxyType, name).Dec()
 }
 
@@ -60,46 +68,76 @@ func newServerMetrics() *serverMetrics {
 	m := &serverMetrics{
 		clientCount: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
+
 			Subsystem: serverSubsystem,
-			Name:      "client_counts",
-			Help:      "The current client counts of frps",
+
+			Name: "client_counts",
+
+			Help: "The current client counts of frps",
 		}),
+
 		proxyCount: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
+
 			Subsystem: serverSubsystem,
-			Name:      "proxy_counts",
-			Help:      "The current proxy counts",
+
+			Name: "proxy_counts",
+
+			Help: "The current proxy counts",
 		}, []string{"type"}),
+
 		proxyCountDetailed: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
+
 			Subsystem: serverSubsystem,
-			Name:      "proxy_counts_detailed",
-			Help:      "The current number of proxies grouped by type and name",
+
+			Name: "proxy_counts_detailed",
+
+			Help: "The current number of proxies grouped by type and name",
 		}, []string{"type", "name"}),
+
 		connectionCount: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
+
 			Subsystem: serverSubsystem,
-			Name:      "connection_counts",
-			Help:      "The current connection counts",
+
+			Name: "connection_counts",
+
+			Help: "The current connection counts",
 		}, []string{"name", "type"}),
+
 		trafficIn: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
+
 			Subsystem: serverSubsystem,
-			Name:      "traffic_in",
-			Help:      "The total in traffic",
+
+			Name: "traffic_in",
+
+			Help: "The total in traffic",
 		}, []string{"name", "type"}),
+
 		trafficOut: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
+
 			Subsystem: serverSubsystem,
-			Name:      "traffic_out",
-			Help:      "The total out traffic",
+
+			Name: "traffic_out",
+
+			Help: "The total out traffic",
 		}, []string{"name", "type"}),
 	}
+
 	prometheus.MustRegister(m.clientCount)
+
 	prometheus.MustRegister(m.proxyCount)
+
 	prometheus.MustRegister(m.proxyCountDetailed)
+
 	prometheus.MustRegister(m.connectionCount)
+
 	prometheus.MustRegister(m.trafficIn)
+
 	prometheus.MustRegister(m.trafficOut)
+
 	return m
 }

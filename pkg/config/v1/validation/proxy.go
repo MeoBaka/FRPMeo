@@ -1,15 +1,27 @@
 // Copyright 2023 The frp Authors
+
 //
+
 // Licensed under the Apache License, Version 2.0 (the "License");
+
 // you may not use this file except in compliance with the License.
+
 // You may obtain a copy of the License at
+
 //
+
 //     http://www.apache.org/licenses/LICENSE-2.0
+
 //
+
 // Unless required by applicable law or agreed to in writing, software
+
 // distributed under the License is distributed on an "AS IS" BASIS,
+
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
 // See the License for the specific language governing permissions and
+
 // limitations under the License.
 
 package validation
@@ -33,9 +45,11 @@ func validateProxyBaseConfigForClient(c *v1.ProxyBaseConfig) error {
 	if err := ValidateAnnotations(c.Annotations); err != nil {
 		return err
 	}
+
 	if !slices.Contains([]string{"", "v1", "v2"}, c.Transport.ProxyProtocolVersion) {
 		return fmt.Errorf("not support proxy protocol version: %s", c.Transport.ProxyProtocolVersion)
 	}
+
 	if !slices.Contains([]string{"client", "server"}, c.Transport.BandwidthLimitMode) {
 		return fmt.Errorf("bandwidth limit mode should be client or server")
 	}
@@ -49,9 +63,12 @@ func validateProxyBaseConfigForClient(c *v1.ProxyBaseConfig) error {
 	if !slices.Contains([]string{"", "tcp", "http"}, c.HealthCheck.Type) {
 		return fmt.Errorf("not support health check type: %s", c.HealthCheck.Type)
 	}
+
 	if c.HealthCheck.Type != "" {
 		if c.HealthCheck.Type == "http" &&
+
 			c.HealthCheck.Path == "" {
+
 			return fmt.Errorf("health check path should not be empty")
 		}
 	}
@@ -61,6 +78,7 @@ func validateProxyBaseConfigForClient(c *v1.ProxyBaseConfig) error {
 			return fmt.Errorf("plugin %s: %v", c.Plugin.Type, err)
 		}
 	}
+
 	return nil
 }
 
@@ -68,6 +86,7 @@ func validateProxyBaseConfigForServer(c *v1.ProxyBaseConfig) error {
 	if err := ValidateAnnotations(c.Annotations); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -75,6 +94,7 @@ func validateDomainConfigForClient(c *v1.DomainConfig) error {
 	if c.SubDomain == "" && len(c.CustomDomains) == 0 {
 		return errors.New("subdomain and custom domains should not be both empty")
 	}
+
 	return nil
 }
 
@@ -88,6 +108,7 @@ func validateDomainConfigForServer(c *v1.DomainConfig, s *v1.ServerConfig) error
 	}
 
 	if c.SubDomain != "" {
+
 		if s.SubDomainHost == "" {
 			return errors.New("subdomain is not supported because this feature is not enabled in server")
 		}
@@ -95,46 +116,79 @@ func validateDomainConfigForServer(c *v1.DomainConfig, s *v1.ServerConfig) error
 		if strings.Contains(c.SubDomain, ".") || strings.Contains(c.SubDomain, "*") {
 			return errors.New("'.' and '*' are not supported in subdomain")
 		}
+
 	}
+
 	return nil
 }
 
 func ValidateProxyConfigurerForClient(c v1.ProxyConfigurer) error {
 	base := c.GetBaseConfig()
+
 	if err := validateProxyBaseConfigForClient(base); err != nil {
 		return err
 	}
 
 	switch v := c.(type) {
+
 	case *v1.TCPProxyConfig:
+
 		return validateTCPProxyConfigForClient(v)
+
 	case *v1.UDPProxyConfig:
+
 		return validateUDPProxyConfigForClient(v)
+
 	case *v1.TCPMuxProxyConfig:
+
 		return validateTCPMuxProxyConfigForClient(v)
+
 	case *v1.HTTPProxyConfig:
+
 		return validateHTTPProxyConfigForClient(v)
+
 	case *v1.HTTPSProxyConfig:
+
 		return validateHTTPSProxyConfigForClient(v)
+
 	case *v1.STCPProxyConfig:
+
 		return validateSTCPProxyConfigForClient(v)
+
 	case *v1.XTCPProxyConfig:
+
 		return validateXTCPProxyConfigForClient(v)
+
 	case *v1.SUDPProxyConfig:
+
 		return validateSUDPProxyConfigForClient(v)
+
 	case *v1.XUDPProxyConfig:
+
 		return validateXUDPProxyConfigForClient(v)
+
 	case *v1.TCPUDPProxyConfig:
+
 		return validateTCPUDPProxyConfigForClient(v)
+
 	case *v1.STCPSUDPProxyConfig:
+
 		return validateSTCPSUDPProxyConfigForClient(v)
+
 	case *v1.XTCPXUDPProxyConfig:
+
 		return validateXTCPXUDPProxyConfigForClient(v)
+
 	case *v1.MCProxyConfig:
+
 		return validateMCProxyConfigForClient(v)
+
 	case *v1.PEProxyConfig:
+
 		return validatePEProxyConfigForClient(v)
+
 	}
+
 	return errors.New("unknown proxy config type")
 }
 
@@ -154,6 +208,7 @@ func validateTCPMuxProxyConfigForClient(c *v1.TCPMuxProxyConfig) error {
 	if !slices.Contains([]string{string(v1.TCPMultiplexerHTTPConnect)}, c.Multiplexer) {
 		return fmt.Errorf("not support multiplexer: %s", c.Multiplexer)
 	}
+
 	return nil
 }
 
@@ -213,6 +268,7 @@ func validateMCProxyConfigForClient(c *v1.MCProxyConfig) error {
 	if c.RemotePort == 0 {
 		return errors.New("remotePort is required for the mc proxy type")
 	}
+
 	return validateDomainConfigForClient(&c.DomainConfig)
 }
 
@@ -220,6 +276,7 @@ func validateMCProxyConfigForServer(c *v1.MCProxyConfig, s *v1.ServerConfig) err
 	if c.RemotePort == 0 {
 		return errors.New("remotePort is required for the mc proxy type")
 	}
+
 	return validateDomainConfigForServer(&c.DomainConfig, s)
 }
 
@@ -227,9 +284,11 @@ func validatePEProxyConfigForClient(c *v1.PEProxyConfig) error {
 	if c.RemotePort == 0 {
 		return errors.New("remotePort is required for the pe proxy type")
 	}
+
 	if len(c.ForcedHosts) == 0 {
 		return errors.New("forcedHosts must not be empty for the pe proxy type")
 	}
+
 	return nil
 }
 
@@ -237,46 +296,79 @@ func validatePEProxyConfigForServer(c *v1.PEProxyConfig, _ *v1.ServerConfig) err
 	if c.RemotePort == 0 {
 		return errors.New("remotePort is required for the pe proxy type")
 	}
+
 	return nil
 }
 
 func ValidateProxyConfigurerForServer(c v1.ProxyConfigurer, s *v1.ServerConfig) error {
 	base := c.GetBaseConfig()
+
 	if err := validateProxyBaseConfigForServer(base); err != nil {
 		return err
 	}
 
 	switch v := c.(type) {
+
 	case *v1.TCPProxyConfig:
+
 		return validateTCPProxyConfigForServer(v, s)
+
 	case *v1.UDPProxyConfig:
+
 		return validateUDPProxyConfigForServer(v, s)
+
 	case *v1.TCPMuxProxyConfig:
+
 		return validateTCPMuxProxyConfigForServer(v, s)
+
 	case *v1.HTTPProxyConfig:
+
 		return validateHTTPProxyConfigForServer(v, s)
+
 	case *v1.HTTPSProxyConfig:
+
 		return validateHTTPSProxyConfigForServer(v, s)
+
 	case *v1.STCPProxyConfig:
+
 		return validateSTCPProxyConfigForServer(v, s)
+
 	case *v1.XTCPProxyConfig:
+
 		return validateXTCPProxyConfigForServer(v, s)
+
 	case *v1.SUDPProxyConfig:
+
 		return validateSUDPProxyConfigForServer(v, s)
+
 	case *v1.XUDPProxyConfig:
+
 		return validateXUDPProxyConfigForServer(v, s)
+
 	case *v1.TCPUDPProxyConfig:
+
 		return validateTCPUDPProxyConfigForServer(v, s)
+
 	case *v1.STCPSUDPProxyConfig:
+
 		return validateSTCPSUDPProxyConfigForServer(v, s)
+
 	case *v1.XTCPXUDPProxyConfig:
+
 		return validateXTCPXUDPProxyConfigForServer(v, s)
+
 	case *v1.MCProxyConfig:
+
 		return validateMCProxyConfigForServer(v, s)
+
 	case *v1.PEProxyConfig:
+
 		return validatePEProxyConfigForServer(v, s)
+
 	default:
+
 		return errors.New("unknown proxy config type")
+
 	}
 }
 
@@ -290,7 +382,9 @@ func validateUDPProxyConfigForServer(c *v1.UDPProxyConfig, s *v1.ServerConfig) e
 
 func validateTCPMuxProxyConfigForServer(c *v1.TCPMuxProxyConfig, s *v1.ServerConfig) error {
 	if c.Multiplexer == string(v1.TCPMultiplexerHTTPConnect) &&
+
 		s.TCPMuxHTTPConnectPort == 0 {
+
 		return fmt.Errorf("tcpmux with multiplexer httpconnect not supported because this feature is not enabled in server")
 	}
 
@@ -326,20 +420,24 @@ func validateSUDPProxyConfigForServer(c *v1.SUDPProxyConfig, s *v1.ServerConfig)
 }
 
 // ValidateAnnotations validates that a set of annotations are correctly defined.
+
 func ValidateAnnotations(annotations map[string]string) error {
 	if len(annotations) == 0 {
 		return nil
 	}
 
 	var errs error
+
 	for k := range annotations {
 		for _, msg := range validation.IsQualifiedName(strings.ToLower(k)) {
 			errs = AppendError(errs, fmt.Errorf("annotation key %s is invalid: %s", k, msg))
 		}
 	}
+
 	if err := ValidateAnnotationsSize(annotations); err != nil {
 		errs = AppendError(errs, err)
 	}
+
 	return errs
 }
 
@@ -347,11 +445,14 @@ const TotalAnnotationSizeLimitB int = 256 * (1 << 10) // 256 kB
 
 func ValidateAnnotationsSize(annotations map[string]string) error {
 	var totalSize int64
+
 	for k, v := range annotations {
-		totalSize += (int64)(len(k)) + (int64)(len(v))
+		totalSize += int64(len(k)) + int64(len(v))
 	}
-	if totalSize > (int64)(TotalAnnotationSizeLimitB) {
+
+	if totalSize > int64(TotalAnnotationSizeLimitB) {
 		return fmt.Errorf("annotations size %d is larger than limit %d", totalSize, TotalAnnotationSizeLimitB)
 	}
+
 	return nil
 }

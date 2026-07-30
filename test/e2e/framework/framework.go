@@ -18,85 +18,124 @@ import (
 
 type Options struct {
 	TotalParallelNode int
-	CurrentNodeIndex  int
-	FromPortIndex     int
-	ToPortIndex       int
+
+	CurrentNodeIndex int
+
+	FromPortIndex int
+
+	ToPortIndex int
 }
 
 type Framework struct {
 	TempDirectory string
 
 	// ports used in this framework indexed by port name.
+
 	usedPorts map[string]int
 
 	// record ports allocated by this framework and release them after each test
+
 	allocatedPorts []int
 
 	// portAllocator to alloc port for this test case.
+
 	portAllocator *port.Allocator
 
 	// Multiple default mock servers used for e2e testing.
+
 	mockServers *MockServers
 
 	// beforeEachStarted indicates that BeforeEach has started
+
 	beforeEachStarted bool
 
 	serverConfPaths []string
+
 	serverProcesses []*process.Process
+
 	clientConfPaths []string
+
 	clientProcesses []*process.Process
 
 	// Manual registered mock servers.
+
 	servers []server.Server
 
 	// used to generate unique config file name.
+
 	configFileIndex int64
 
 	// envs used to start processes, the form is `key=value`.
+
 	osEnvs []string
 }
 
 func NewDefaultFramework() *Framework {
 	suiteConfig, _ := ginkgo.GinkgoConfiguration()
+
 	options := Options{
 		TotalParallelNode: suiteConfig.ParallelTotal,
-		CurrentNodeIndex:  suiteConfig.ParallelProcess,
-		FromPortIndex:     10000,
-		ToPortIndex:       30000,
+
+		CurrentNodeIndex: suiteConfig.ParallelProcess,
+
+		FromPortIndex: 10000,
+
+		ToPortIndex: 30000,
 	}
+
 	return NewFramework(options)
 }
 
 func NewFramework(opt Options) *Framework {
 	f := &Framework{
 		portAllocator: port.NewAllocator(opt.FromPortIndex, opt.ToPortIndex, opt.TotalParallelNode, opt.CurrentNodeIndex-1),
-		usedPorts:     make(map[string]int),
+
+		usedPorts: make(map[string]int),
 	}
 
 	ginkgo.BeforeEach(f.BeforeEach)
+
 	ginkgo.AfterEach(f.AfterEach)
+
 	return f
 }
 
 // BeforeEach create a temp directory.
+
 func (f *Framework) BeforeEach() {
 	f.beforeEachStarted = true
 
 	dir, err := os.MkdirTemp(os.TempDir(), "frp-e2e-test-*")
+
 	ExpectNoError(err)
-	f.TempDirectory = dir
+
+	// Forward slashes, even on Windows. Tests paste this straight into config
+
+	// templates, and TOML reads a backslash in a quoted string as the start of
+
+	// an escape - a path like C:\Users\... makes the whole file unparsable.
+
+	// Every os call here takes forward slashes on Windows too.
+
+	f.TempDirectory = filepath.ToSlash(dir)
 
 	f.mockServers = NewMockServers(f.portAllocator)
+
 	if err := f.mockServers.Run(); err != nil {
 		Failf("%v", err)
 	}
 
 	params := f.mockServers.GetTemplateParams()
+
 	for k, v := range params {
 		switch t := v.(type) {
+
 		case int:
+
 			f.usedPorts[k] = t
+
 		default:
+
 		}
 	}
 }
@@ -107,72 +146,115 @@ func (f *Framework) AfterEach() {
 	}
 
 	// stop processor
+
 	for _, p := range f.serverProcesses {
+
 		_ = p.Stop()
+
 		if TestContext.Debug || ginkgo.CurrentSpecReport().Failed() {
+
 			fmt.Println(p.ErrorOutput())
+
 			fmt.Println(p.StdOutput())
+
 		}
+
 	}
+
 	for _, p := range f.clientProcesses {
+
 		_ = p.Stop()
+
 		if TestContext.Debug || ginkgo.CurrentSpecReport().Failed() {
+
 			fmt.Println(p.ErrorOutput())
+
 			fmt.Println(p.StdOutput())
+
 		}
+
 	}
+
 	f.serverProcesses = nil
+
 	f.clientProcesses = nil
 
 	// close default mock servers
+
 	f.mockServers.Close()
 
 	// close manual registered mock servers
+
 	for _, s := range f.servers {
 		s.Close()
 	}
 
 	// clean directory
+
 	os.RemoveAll(f.TempDirectory)
+
 	f.TempDirectory = ""
+
 	f.serverConfPaths = []string{}
+
 	f.clientConfPaths = []string{}
 
 	// release used ports
+
 	for _, port := range f.usedPorts {
 		f.portAllocator.Release(port)
 	}
+
 	f.usedPorts = make(map[string]int)
 
 	// release allocated ports
+
 	for _, port := range f.allocatedPorts {
 		f.portAllocator.Release(port)
 	}
+
 	f.allocatedPorts = make([]int, 0)
 
 	// clear os envs
+
 	f.osEnvs = make([]string, 0)
 }
 
 var portRegex = regexp.MustCompile(`{{ \.Port.*? }}`)
 
 // RenderPortsTemplate render templates with ports.
+
 //
+
 // Local: {{ .Port1 }}
+
 // Target: {{ .Port2 }}
+
 //
+
 // return rendered content and all allocated ports.
+
 func (f *Framework) genPortsFromTemplates(templates []string) (ports map[string]int, err error) {
 	ports = make(map[string]int)
+
 	for _, t := range templates {
+
 		arrs := portRegex.FindAllString(t, -1)
+
 		for _, str := range arrs {
+
 			str = strings.TrimPrefix(str, "{{ .")
+
 			str = strings.TrimSuffix(str, " }}")
+
 			str = strings.TrimSpace(str)
+
 			ports[str] = 0
+
 		}
+
 	}
+
 	defer func() {
 		if err != nil {
 			for _, port := range ports {
@@ -182,16 +264,22 @@ func (f *Framework) genPortsFromTemplates(templates []string) (ports map[string]
 	}()
 
 	for name := range ports {
+
 		port := f.portAllocator.GetByName(name)
+
 		if port <= 0 {
 			return nil, fmt.Errorf("can't allocate port")
 		}
+
 		ports[name] = port
+
 	}
+
 	return
 }
 
 // RenderTemplates alloc all ports for port names placeholder.
+
 func (f *Framework) RenderTemplates(templates []string) (outs []string, ports map[string]int, err error) {
 	ports, err = f.genPortsFromTemplates(templates)
 	if err != nil {
@@ -199,6 +287,7 @@ func (f *Framework) RenderTemplates(templates []string) (outs []string, ports ma
 	}
 
 	params := f.mockServers.GetTemplateParams()
+
 	for name, port := range ports {
 		params[name] = port
 	}
@@ -208,16 +297,22 @@ func (f *Framework) RenderTemplates(templates []string) (outs []string, ports ma
 	}
 
 	for _, t := range templates {
+
 		tmpl, err := template.New("frp-e2e").Parse(t)
 		if err != nil {
 			return nil, nil, err
 		}
+
 		buffer := bytes.NewBuffer(nil)
+
 		if err = tmpl.Execute(buffer, params); err != nil {
 			return nil, nil, err
 		}
+
 		outs = append(outs, buffer.String())
+
 	}
+
 	return
 }
 
@@ -227,42 +322,61 @@ func (f *Framework) PortByName(name string) int {
 
 func (f *Framework) AllocPort() int {
 	port := f.portAllocator.Get()
+
 	ExpectTrue(port > 0, "alloc port failed")
+
 	f.allocatedPorts = append(f.allocatedPorts, port)
+
 	return port
 }
 
 func (f *Framework) AllocPortExcludingRanges(ranges ...[2]int) int {
 	for range 1000 {
+
 		port := f.portAllocator.Get()
+
 		ExpectTrue(port > 0, "alloc port failed")
 
 		inExcludedRange := false
+
 		for _, portRange := range ranges {
 			if port >= portRange[0] && port <= portRange[1] {
+
 				inExcludedRange = true
+
 				break
+
 			}
 		}
+
 		if inExcludedRange {
+
 			f.portAllocator.Release(port)
+
 			continue
+
 		}
 
 		f.allocatedPorts = append(f.allocatedPorts, port)
+
 		return port
+
 	}
 
 	Failf("alloc port outside excluded ranges failed")
+
 	return 0
 }
 
 func (f *Framework) RunServer(portName string, s server.Server) {
 	f.servers = append(f.servers, s)
+
 	if s.BindPort() > 0 && portName != "" {
 		f.usedPorts[portName] = s.BindPort()
 	}
+
 	err := s.Run()
+
 	ExpectNoError(err, "RunServer: with PortName %s", portName)
 }
 
@@ -272,7 +386,14 @@ func (f *Framework) SetEnvs(envs []string) {
 
 func (f *Framework) WriteTempFile(name string, content string) string {
 	filePath := filepath.Join(f.TempDirectory, name)
+
 	err := os.WriteFile(filePath, []byte(content), 0o600)
+
 	ExpectNoError(err)
-	return filePath
+
+	// See BeforeEach: callers put this path into config templates, where a
+
+	// Windows backslash would be read as a TOML escape.
+
+	return filepath.ToSlash(filePath)
 }

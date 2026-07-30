@@ -21,14 +21,21 @@ var _ = ginkgo.Describe("[Feature: TCPMUX httpconnect]", func() {
 
 	getDefaultServerConf := func(httpconnectPort int) string {
 		conf := consts.DefaultServerConfig + `
+
 		tcpmuxHTTPConnectPort = %d
+
 		`
+
 		return fmt.Sprintf(conf, httpconnectPort)
 	}
+
 	newServer := func(port int, respContent string) *streamserver.Server {
 		return streamserver.New(
+
 			streamserver.TCP,
+
 			streamserver.WithBindPort(port),
+
 			streamserver.WithRespContent([]byte(respContent)),
 		)
 	}
@@ -37,51 +44,81 @@ var _ = ginkgo.Describe("[Feature: TCPMUX httpconnect]", func() {
 		if username == "" {
 			return fmt.Sprintf("http://127.0.0.1:%d", port)
 		}
+
 		return fmt.Sprintf("http://%s:%s@127.0.0.1:%d", username, password, port)
 	}
 
 	ginkgo.It("Route by HTTP user", func() {
 		vhostPort := f.AllocPort()
+
 		serverConf := getDefaultServerConf(vhostPort)
 
 		fooPort := f.AllocPort()
+
 		f.RunServer("", newServer(fooPort, "foo"))
 
 		barPort := f.AllocPort()
+
 		f.RunServer("", newServer(barPort, "bar"))
 
 		otherPort := f.AllocPort()
+
 		f.RunServer("", newServer(otherPort, "other"))
 
 		clientConf := consts.DefaultClientConfig
+
 		clientConf += fmt.Sprintf(`
+
 			[[proxies]]
+
 			name = "foo"
+
 			type = "tcpmux"
+
 			multiplexer = "httpconnect"
+
 			localPort = %d
+
 			customDomains = ["normal.example.com"]
+
 			routeByHTTPUser = "user1"
 
-			[[proxies]]
-			name = "bar"
-			type = "tcpmux"
-			multiplexer = "httpconnect"
-			localPort = %d
-			customDomains = ["normal.example.com"]
-			routeByHTTPUser = "user2"
+
 
 			[[proxies]]
-			name = "catchAll"
+
+			name = "bar"
+
 			type = "tcpmux"
+
 			multiplexer = "httpconnect"
+
 			localPort = %d
+
 			customDomains = ["normal.example.com"]
+
+			routeByHTTPUser = "user2"
+
+
+
+			[[proxies]]
+
+			name = "catchAll"
+
+			type = "tcpmux"
+
+			multiplexer = "httpconnect"
+
+			localPort = %d
+
+			customDomains = ["normal.example.com"]
+
 			`, fooPort, barPort, otherPort)
 
 		f.RunProcesses(serverConf, []string{clientConf})
 
 		// user1
+
 		framework.NewRequestExpect(f).Explain("user1").
 			RequestModify(func(r *request.Request) {
 				r.Addr("normal.example.com").Proxy(proxyURLWithAuth("user1", "", vhostPort))
@@ -90,6 +127,7 @@ var _ = ginkgo.Describe("[Feature: TCPMUX httpconnect]", func() {
 			Ensure()
 
 		// user2
+
 		framework.NewRequestExpect(f).Explain("user2").
 			RequestModify(func(r *request.Request) {
 				r.Addr("normal.example.com").Proxy(proxyURLWithAuth("user2", "", vhostPort))
@@ -98,6 +136,7 @@ var _ = ginkgo.Describe("[Feature: TCPMUX httpconnect]", func() {
 			Ensure()
 
 		// other user
+
 		framework.NewRequestExpect(f).Explain("other user").
 			RequestModify(func(r *request.Request) {
 				r.Addr("normal.example.com").Proxy(proxyURLWithAuth("user3", "", vhostPort))
@@ -108,26 +147,39 @@ var _ = ginkgo.Describe("[Feature: TCPMUX httpconnect]", func() {
 
 	ginkgo.It("Proxy auth", func() {
 		vhostPort := f.AllocPort()
+
 		serverConf := getDefaultServerConf(vhostPort)
 
 		fooPort := f.AllocPort()
+
 		f.RunServer("", newServer(fooPort, "foo"))
 
 		clientConf := consts.DefaultClientConfig
+
 		clientConf += fmt.Sprintf(`
+
 			[[proxies]]
+
 			name = "test"
+
 			type = "tcpmux"
+
 			multiplexer = "httpconnect"
+
 			localPort = %d
+
 			customDomains = ["normal.example.com"]
+
 			httpUser = "test"
+
 			httpPassword = "test"
+
 		`, fooPort)
 
 		f.RunProcesses(serverConf, []string{clientConf})
 
 		// not set auth header
+
 		framework.NewRequestExpect(f).Explain("no auth").
 			RequestModify(func(r *request.Request) {
 				r.Addr("normal.example.com").Proxy(proxyURLWithAuth("", "", vhostPort))
@@ -136,6 +188,7 @@ var _ = ginkgo.Describe("[Feature: TCPMUX httpconnect]", func() {
 			Ensure()
 
 		// set incorrect auth header
+
 		framework.NewRequestExpect(f).Explain("incorrect auth").
 			RequestModify(func(r *request.Request) {
 				r.Addr("normal.example.com").Proxy(proxyURLWithAuth("test", "invalid", vhostPort))
@@ -144,6 +197,7 @@ var _ = ginkgo.Describe("[Feature: TCPMUX httpconnect]", func() {
 			Ensure()
 
 		// set correct auth header
+
 		framework.NewRequestExpect(f).Explain("correct auth").
 			RequestModify(func(r *request.Request) {
 				r.Addr("normal.example.com").Proxy(proxyURLWithAuth("test", "test", vhostPort))
@@ -154,59 +208,90 @@ var _ = ginkgo.Describe("[Feature: TCPMUX httpconnect]", func() {
 
 	ginkgo.It("TCPMux Passthrough", func() {
 		vhostPort := f.AllocPort()
+
 		serverConf := getDefaultServerConf(vhostPort)
+
 		serverConf += `
+
 		tcpmuxPassthrough = true
+
 		`
 
 		var (
-			respErr            error
+			respErr error
+
 			connectRequestHost string
 		)
+
 		newServer := func(port int) *streamserver.Server {
 			return streamserver.New(
+
 				streamserver.TCP,
+
 				streamserver.WithBindPort(port),
+
 				streamserver.WithCustomHandler(func(conn net.Conn) {
 					defer conn.Close()
 
 					// read HTTP CONNECT request
+
 					bufioReader := bufio.NewReader(conn)
+
 					req, err := http.ReadRequest(bufioReader)
 					if err != nil {
+
 						respErr = err
+
 						return
+
 					}
+
 					connectRequestHost = req.Host
 
 					// return ok response
+
 					res := httppkg.OkResponse()
+
 					if res.Body != nil {
 						defer res.Body.Close()
 					}
+
 					_ = res.Write(conn)
 
 					buf, err := rpc.ReadBytes(conn)
 					if err != nil {
+
 						respErr = err
+
 						return
+
 					}
+
 					_, _ = rpc.WriteBytes(conn, buf)
 				}),
 			)
 		}
 
 		localPort := f.AllocPort()
+
 		f.RunServer("", newServer(localPort))
 
 		clientConf := consts.DefaultClientConfig
+
 		clientConf += fmt.Sprintf(`
+
 			[[proxies]]
+
 			name = "test"
+
 			type = "tcpmux"
+
 			multiplexer = "httpconnect"
+
 			localPort = %d
+
 			customDomains = ["normal.example.com"]
+
 			`, localPort)
 
 		f.RunProcesses(serverConf, []string{clientConf})
@@ -217,7 +302,9 @@ var _ = ginkgo.Describe("[Feature: TCPMUX httpconnect]", func() {
 			}).
 			ExpectResp([]byte("frp")).
 			Ensure()
+
 		framework.ExpectNoError(respErr)
+
 		framework.ExpectEqualValues(connectRequestHost, "normal.example.com")
 	})
 })
