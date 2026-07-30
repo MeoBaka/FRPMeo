@@ -88,8 +88,8 @@ func TestMatchPort(t *testing.T) {
 // a whole firewall to do it. Allow matches against the compiled form, so the
 // test compiles too rather than checking a second implementation.
 func matchPortSpec(spec string, port int) bool {
-	ranges, any := compilePorts(spec)
-	return any || matchRanges(ranges, port)
+	ranges, anyPort := compilePorts(spec)
+	return anyPort || matchRanges(ranges, port)
 }
 
 func TestParsePortSpec(t *testing.T) {
@@ -183,7 +183,12 @@ func TestAllowDefaultPolicy(t *testing.T) {
 
 func TestAllowDisabledFirewallAllowsEverything(t *testing.T) {
 	f := newTestFirewall(t, []Rule{{ID: "r", Action: "deny", CIDR: "10.0.0.1", Port: "all"}})
-	if err := f.SetConfig(Config{Default: "deny", Rules: []Rule{{ID: "r", Action: "deny", CIDR: "10.0.0.1", Port: "all"}}, Provider: ProviderConfig{Mode: "off"}}); err != nil {
+	cfg := Config{
+		Default:  "deny",
+		Rules:    []Rule{{ID: "r", Action: "deny", CIDR: "10.0.0.1", Port: "all"}},
+		Provider: ProviderConfig{Mode: "off"},
+	}
+	if err := f.SetConfig(cfg); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
 	if ok, _ := f.Allow("10.0.0.1:1", 6000); !ok {
@@ -323,7 +328,7 @@ func TestAllowBareAddressRule(t *testing.T) {
 		t.Error("the named address should be blocked")
 	}
 	if ok, _ := f.Allow("203.0.113.46:5555", 6000); !ok {
-		t.Error("its neighbour should pass")
+		t.Error("its neighbor should pass")
 	}
 }
 

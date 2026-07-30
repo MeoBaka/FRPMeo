@@ -172,7 +172,7 @@ func (g *Gateway) Run() {
 
 		// Before the ssh handshake, not after: this port reaches the same
 
-		// tunnelling as the control port, so a peer the firewall has turned
+		// tunneling as the control port, so a peer the firewall has turned
 
 		// away there must not get a second door here.
 

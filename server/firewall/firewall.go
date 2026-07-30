@@ -209,7 +209,7 @@ func compileRule(r Rule, index int) compiledRule {
 // compilePorts reads a port spec into the ranges it names. A malformed entry is
 // dropped rather than widened, so a spec naming nothing valid matches nothing -
 // see matchPort's old contract, which this keeps.
-func compilePorts(spec string) (ranges []portRange, any bool) {
+func compilePorts(spec string) (ranges []portRange, anyPort bool) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" || spec == "*" || strings.EqualFold(spec, "all") {
 		return nil, true
@@ -568,7 +568,7 @@ func cleanReason(s string) string {
 			break
 		}
 		// Anything below space - newline, carriage return, the terminal escapes
-		// that colour our own output - becomes a space.
+		// that color our own output - becomes a space.
 		if r < ' ' || r == 0x7f {
 			r = ' '
 		}

@@ -9,8 +9,6 @@ import (
 	_ "github.com/onsi/ginkgo/v2"
 
 	"github.com/fatedier/frp/pkg/util/log"
-	// test source
-
 	"github.com/fatedier/frp/test/e2e/framework"
 	_ "github.com/fatedier/frp/test/e2e/legacy/basic"
 	_ "github.com/fatedier/frp/test/e2e/legacy/features"
