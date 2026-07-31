@@ -42,6 +42,11 @@ type HTTPAuthMiddleware struct {
 	passwd string
 
 	authFailDelay time.Duration
+
+	// onAuthFail, when set, is told about every rejected login. See
+	// SetOnAuthFail.
+
+	onAuthFail func(remoteAddr string)
 }
 
 func NewHTTPAuthMiddleware(user, passwd string) *HTTPAuthMiddleware {
@@ -58,6 +63,27 @@ func (authMid *HTTPAuthMiddleware) SetAuthFailDelay(delay time.Duration) *HTTPAu
 	return authMid
 }
 
+// SetOnAuthFail installs a callback run for every rejected login, with the
+// address it came from.
+
+//
+
+// A wrong password is the strongest signal this port produces. Nobody who
+
+// belongs here gets it wrong repeatedly - they have it saved, or they look it
+
+// up - so unlike a rate, which has to guess where normal ends, this needs no
+
+// threshold to be meaningful. The delay above slows a guesser down; this is
+
+// what lets somebody act on it.
+
+func (authMid *HTTPAuthMiddleware) SetOnAuthFail(fn func(remoteAddr string)) *HTTPAuthMiddleware {
+	authMid.onAuthFail = fn
+
+	return authMid
+}
+
 func (authMid *HTTPAuthMiddleware) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqUser, reqPasswd, hasAuth := r.BasicAuth()
@@ -70,6 +96,14 @@ func (authMid *HTTPAuthMiddleware) Middleware(next http.Handler) http.Handler {
 
 			next.ServeHTTP(w, r)
 		} else {
+
+			// Reported before the delay, not after: the point of the delay is
+			// to hold this request open, and whoever is counting failures
+			// should not be kept waiting alongside it.
+
+			if authMid.onAuthFail != nil {
+				authMid.onAuthFail(r.RemoteAddr)
+			}
 
 			if authMid.authFailDelay > 0 {
 				time.Sleep(authMid.authFailDelay)

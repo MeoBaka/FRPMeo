@@ -295,6 +295,18 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 			return svr.rc.Firewall.AdmitWeb(remoteAddr).Allowed
 		})
 
+		// And a wrong password counts as a strike, which is the same evidence
+		// as a wrong protocol on the control port: nobody who belongs here gets
+		// it wrong again and again. The rate limit above still has to guess
+		// where normal ends; this does not, so it is what actually stops a
+		// guesser rather than slowing one down.
+
+		webServer.SetOnAuthFail(func(remoteAddr string) {
+			log.Debugf("[FW] dashboard login failed from %s", remoteAddr)
+
+			svr.rc.Firewall.ReportProtocolFailure(remoteAddr)
+		})
+
 	}
 
 	// Create tcpmux httpconnect multiplexer.

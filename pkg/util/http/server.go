@@ -67,6 +67,10 @@ type Server struct {
 	// See SetConnFilter.
 
 	connFilter func(remoteAddr string) bool
+
+	// auth is kept so the failure hook can be attached after construction.
+
+	auth *netpkg.HTTPAuthMiddleware
 }
 
 func NewServer(cfg v1.WebServerConfig) (*Server, error) {
@@ -136,9 +140,33 @@ func NewServer(cfg v1.WebServerConfig) (*Server, error) {
 
 	}
 
-	s.authMiddleware = netpkg.NewHTTPAuthMiddleware(cfg.User, cfg.Password).SetAuthFailDelay(200 * time.Millisecond).Middleware
+	s.auth = netpkg.NewHTTPAuthMiddleware(cfg.User, cfg.Password).SetAuthFailDelay(200 * time.Millisecond)
+
+	s.authMiddleware = s.auth.Middleware
 
 	return s, nil
+}
+
+// SetOnAuthFail installs a callback run for every rejected login on this
+// server, with the address it came from.
+
+//
+
+// Separate from SetConnFilter because it answers a different question: the
+// filter decides whether a peer may reach the handshake at all, this reports
+// what the peer turned out to be once it got there. A wrong password is the
+// clearest evidence this port produces - nobody who belongs here gets it wrong
+// again and again - so it is worth acting on with far less patience than a
+// rate.
+
+//
+
+// Must be called before Run.
+
+func (s *Server) SetOnAuthFail(fn func(remoteAddr string)) {
+	if s.auth != nil {
+		s.auth.SetOnAuthFail(fn)
+	}
 }
 
 func (s *Server) Address() string {
