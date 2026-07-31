@@ -161,6 +161,160 @@
       />
     </el-card>
 
+    <!-- AntiAttacker -->
+    <el-card class="section" shadow="never">
+      <div class="bar" style="justify-content:space-between">
+        <div class="card-title" style="margin:0">AntiAttacker (rate limiting)</div>
+        <el-switch v-model="snap.antiAttacker.enabled" @change="save" />
+      </div>
+      <p class="hint">
+        Rules decide who may connect; this decides how often. A source over the
+        limit is refused for the rest of the window, and only banned once it goes
+        over in several separate windows - so one burst throttles, a sustained
+        one blocks. Bans expire on their own and are never extended by retries.
+        Off by default: a limit set too low turns real users away.
+      </p>
+      <p class="hint">
+        It cannot drop packets. The kernel has finished the TCP handshake before
+        frps is handed the connection, so this makes refusing cheap rather than
+        preventing the attempt. frps does not touch the host firewall.
+      </p>
+
+      <template v-if="snap.antiAttacker.enabled">
+        <div class="fg-inline" style="margin-top:12px">
+          <label>Apply to</label>
+          <el-select v-model="snap.antiAttacker.scope" class="w220" @change="save">
+            <el-option label="All proxies" value="all" />
+            <el-option label="Selected proxies" value="selected" />
+          </el-select>
+          <span class="hint">
+            Named per proxy rather than per port because http / https proxies all
+            answer on the shared vhost port, so a port cannot tell them apart.
+          </span>
+        </div>
+
+        <div class="fg-inline" style="margin-top:12px" v-if="snap.antiAttacker.scope === 'selected'">
+          <label>Proxies</label>
+          <el-input
+            v-model="proxiesText"
+            type="textarea"
+            :rows="3"
+            placeholder="user/name per line, or just name for proxies with no user&#10;bob/web&#10;ssh"
+          />
+          <span class="hint">
+            Matched on user + name: proxy names are only unique within a user, so
+            a bare name never picks up another tenant's proxy.
+          </span>
+        </div>
+
+        <el-divider content-position="left">TCP - counted per connection</el-divider>
+        <div class="bar">
+          <el-switch v-model="snap.antiAttacker.tcp.enabled" @change="save" />
+          <span class="hint">
+            tcp, mc, tcpmux, https, the tcp half of tcp+udp, and the control
+            port. Refused connections are closed with RST, leaving no TIME_WAIT
+            socket behind. stcp / sudp / xtcp+xudp are exempt: their callers
+            proved a shared secret to get this far, so a limit could only
+            throttle a tunnel that is entitled to the traffic.
+          </span>
+        </div>
+        <div class="bar" style="margin-top:8px" v-if="snap.antiAttacker.tcp.enabled">
+          <label class="lbl">Window (ms)</label>
+          <el-input v-model.number="snap.antiAttacker.tcp.windowMs" type="number" class="w120" />
+          <label class="lbl">Max / window</label>
+          <el-input v-model.number="snap.antiAttacker.tcp.maxPerWindow" type="number" class="w90" />
+          <label class="lbl">Ban after</label>
+          <el-input v-model.number="snap.antiAttacker.tcp.banViolations" type="number" class="w90" />
+          <label class="lbl">Ban (s)</label>
+          <el-input v-model.number="snap.antiAttacker.tcp.banSeconds" type="number" class="w90" />
+          <el-button @click="save" :loading="saving">Save</el-button>
+        </div>
+        <p class="hint" v-if="snap.antiAttacker.tcp.enabled">
+          Defaults 5000 / 4 / 3 / 60 - four attempts per five seconds, banned for
+          a minute once three separate windows go over. "Ban after" counts
+          windows, not attempts.
+        </p>
+
+        <el-divider content-position="left">HTTP - counted per request</el-divider>
+        <div class="bar">
+          <el-switch v-model="snap.antiAttacker.http.enabled" @change="save" />
+          <span class="hint">
+            Counted per request, not per connection: the vhost proxy pools work
+            connections, so later requests arrive on one admitted long ago.
+            Refused with 429 and a Retry-After rather than a dropped connection,
+            which browsers read as a network error and retry harder.
+          </span>
+        </div>
+        <div class="bar" style="margin-top:8px" v-if="snap.antiAttacker.http.enabled">
+          <label class="lbl">Window (ms)</label>
+          <el-input v-model.number="snap.antiAttacker.http.windowMs" type="number" class="w120" />
+          <label class="lbl">Max / window</label>
+          <el-input v-model.number="snap.antiAttacker.http.maxPerWindow" type="number" class="w90" />
+          <label class="lbl">Ban after</label>
+          <el-input v-model.number="snap.antiAttacker.http.banViolations" type="number" class="w90" />
+          <label class="lbl">Ban (s)</label>
+          <el-input v-model.number="snap.antiAttacker.http.banSeconds" type="number" class="w90" />
+          <label class="lbl">Retry-After (s)</label>
+          <el-input v-model.number="snap.antiAttacker.http.retryAfterSec" type="number" class="w90" placeholder="auto" />
+          <el-button @click="save" :loading="saving">Save</el-button>
+        </div>
+        <div class="fg-inline" style="margin-top:12px" v-if="snap.antiAttacker.http.enabled">
+          <label>Trusted proxies</label>
+          <el-input
+            v-model="trustedText"
+            type="textarea"
+            :rows="2"
+            placeholder="One IP or CIDR per line, e.g. 10.0.0.0/8 - leave blank to ignore X-Forwarded-For"
+          />
+          <span class="hint">
+            Only these peers' X-Forwarded-For is believed. Left blank the socket
+            address is counted instead. Trusting the header without this list
+            does not weaken the limit, it removes it: the value is written by
+            whoever is calling, so an attacker is never the same source twice.
+            Behind a CDN, leaving it blank means every visitor counts as one
+            source - raise the limit accordingly.
+          </span>
+        </div>
+
+        <el-divider content-position="left">UDP - counted per packet</el-divider>
+        <div class="bar">
+          <el-switch v-model="snap.antiAttacker.udp.enabled" @change="save" />
+          <span class="hint">
+            udp and pe (Minecraft Bedrock), plus the udp half of tcp+udp. A
+            refused packet is dropped in silence - UDP has no way to say no.
+          </span>
+        </div>
+        <p class="hint" v-if="snap.antiAttacker.udp.enabled" style="margin-top:8px">
+          No ban here, by design. UDP has no handshake, so a source address is
+          whatever the sender wrote: banning one would let an attacker get any
+          address blocked just by forging it. Per-source limits are still worth
+          having against ordinary floods, but only the global ceilings hold when
+          the source is forged. A zero means that limit is off.
+        </p>
+        <div class="bar" style="margin-top:8px" v-if="snap.antiAttacker.udp.enabled">
+          <label class="lbl">Window (ms)</label>
+          <el-input v-model.number="snap.antiAttacker.udp.windowMs" type="number" class="w120" />
+          <label class="lbl">Packets / window</label>
+          <el-input v-model.number="snap.antiAttacker.udp.maxPacketsPerWindow" type="number" class="w90" />
+          <label class="lbl">Bytes / window</label>
+          <el-input v-model.number="snap.antiAttacker.udp.maxBytesPerWindow" type="number" class="w120" />
+          <el-button @click="save" :loading="saving">Save</el-button>
+        </div>
+        <div class="bar" style="margin-top:8px" v-if="snap.antiAttacker.udp.enabled">
+          <label class="lbl">Global packets / window</label>
+          <el-input v-model.number="snap.antiAttacker.udp.globalMaxPacketsPerWindow" type="number" class="w120" placeholder="0 = off" />
+          <label class="lbl">Global bytes / window</label>
+          <el-input v-model.number="snap.antiAttacker.udp.globalMaxBytesPerWindow" type="number" class="w120" placeholder="0 = off" />
+          <span class="hint">
+            Counted across every source together, and off by default because the
+            right number is whatever this host can carry. Once reached
+            everything is dropped, real traffic included: it bounds the damage
+            rather than telling good from bad.
+          </span>
+        </div>
+      </template>
+    </el-card>
+
     <!-- Add/Edit rule dialog -->
     <el-dialog v-model="dialog.open" :title="dialog.index === -1 ? 'Add rule' : 'Edit rule'" width="480px">
       <el-form label-width="100px">
@@ -204,15 +358,69 @@ interface Provider {
   url: string; method: string; body: string; headers: Record<string, string>; blockedPath: string
   cacheTTLSec: number; timeoutMs: number; failOpen: boolean; insecureTLS: boolean
 }
-interface Snap { enabled: boolean; controlPort: boolean; webPort: boolean; default: string; rules: Rule[]; provider: Provider }
+interface RateProfile {
+  enabled: boolean
+  windowMs: number; maxPerWindow: number; banViolations: number; banSeconds: number
+  idleForgetMs: number; maxTracked: number
+}
+interface HTTPProfile extends RateProfile { trustedProxies: string[]; retryAfterSec: number }
+// UDP is its own shape: two dimensions, a global tier, and no ban - a forged
+// source address makes banning a weapon rather than a defence.
+interface UDPProfile {
+  enabled: boolean
+  windowMs: number
+  maxPacketsPerWindow: number; maxBytesPerWindow: number
+  globalMaxPacketsPerWindow: number; globalMaxBytesPerWindow: number
+  idleForgetMs: number; maxTracked: number
+}
+interface AntiAttacker {
+  enabled: boolean; scope: string; proxies: string[]
+  tcp: RateProfile; http: HTTPProfile; udp: UDPProfile
+}
+interface Snap {
+  enabled: boolean; controlPort: boolean; webPort: boolean; default: string
+  rules: Rule[]; provider: Provider; antiAttacker: AntiAttacker
+}
 
 function defProvider(): Provider {
   return { mode: 'off', frpControlURL: '', frpControlAPIKey: '', url: '', method: 'GET', body: '', headers: {}, blockedPath: '', cacheTTLSec: 300, timeoutMs: 800, failOpen: false, insecureTLS: false }
 }
 
+// Defaults mirror the server's. The tcp numbers come from XCord's speedy-login
+// settings; the http ones are sized so an ordinary page load cannot trip them.
+function defAntiAttacker(): AntiAttacker {
+  return {
+    enabled: false,
+    scope: 'all',
+    proxies: [],
+    // Both profiles ship enabled so that turning the feature on does something.
+    // The master switch above is what keeps it off until asked for.
+    tcp: { enabled: true, windowMs: 5000, maxPerWindow: 4, banViolations: 3, banSeconds: 60, idleForgetMs: 40000, maxTracked: 65536 },
+    http: { enabled: true, windowMs: 10000, maxPerWindow: 120, banViolations: 5, banSeconds: 120, idleForgetMs: 60000, maxTracked: 65536, trustedProxies: [], retryAfterSec: 0 },
+    // Per-source rates from XCord's during-login anti-ddos settings. The global
+    // ceilings stay at zero: no default can guess a host's capacity.
+    udp: { enabled: true, windowMs: 1000, maxPacketsPerWindow: 500, maxBytesPerWindow: 50000, globalMaxPacketsPerWindow: 0, globalMaxBytesPerWindow: 0, idleForgetMs: 30000, maxTracked: 65536 },
+  }
+}
+
+// One entry per line in the textarea, an array on the wire.
+function linesToList(t: string): string[] {
+  return t.split('\n').map((s) => s.trim()).filter(Boolean)
+}
+
 const loading = ref(false)
 const saving = ref(false)
-const snap = reactive<Snap>({ enabled: true, controlPort: false, webPort: false, default: 'allow', rules: [], provider: defProvider() })
+const snap = reactive<Snap>({ enabled: true, controlPort: false, webPort: false, default: 'allow', rules: [], provider: defProvider(), antiAttacker: defAntiAttacker() })
+
+const proxiesText = computed({
+  get: () => (snap.antiAttacker.proxies || []).join('\n'),
+  set: (t: string) => { snap.antiAttacker.proxies = linesToList(t) },
+})
+
+const trustedText = computed({
+  get: () => (snap.antiAttacker.http.trustedProxies || []).join('\n'),
+  set: (t: string) => { snap.antiAttacker.http.trustedProxies = linesToList(t) },
+})
 
 const headersText = computed({
   get: () => Object.entries(snap.provider.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n'),
@@ -263,6 +471,16 @@ async function load() {
     snap.provider = { ...defProvider(), ...(s.provider || {}) }
     if (!snap.provider.mode) snap.provider.mode = 'off'
     if (!snap.provider.headers) snap.provider.headers = {}
+    const aaDef = defAntiAttacker()
+    const aa = s.antiAttacker || ({} as AntiAttacker)
+    snap.antiAttacker = {
+      ...aaDef, ...aa,
+      scope: aa.scope || 'all',
+      proxies: aa.proxies || [],
+      tcp: { ...aaDef.tcp, ...(aa.tcp || {}) },
+      http: { ...aaDef.http, ...(aa.http || {}), trustedProxies: aa.http?.trustedProxies || [] },
+      udp: { ...aaDef.udp, ...(aa.udp || {}) },
+    }
   } catch (e: any) {
     ElMessage.error('Load failed: ' + (e.message || e))
   } finally {
@@ -276,7 +494,7 @@ async function load() {
 async function persist(okMsg: string) {
   saving.value = true
   try {
-    await http.put('../api/firewall', { enabled: snap.enabled, controlPort: snap.controlPort, webPort: snap.webPort, default: snap.default, rules: snap.rules, provider: snap.provider })
+    await http.put('../api/firewall', { enabled: snap.enabled, controlPort: snap.controlPort, webPort: snap.webPort, default: snap.default, rules: snap.rules, provider: snap.provider, antiAttacker: snap.antiAttacker })
     ElMessage.success(okMsg)
     return true
   } catch (e: any) {
@@ -370,4 +588,7 @@ onMounted(load)
 .fg-wide { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; }
 .field-grid > div:not(.fg-wide):not(.fg-inline) { display: flex; flex-direction: column; gap: 6px; }
 .fg-inline { display: flex; align-items: center; gap: 8px; }
+/* Inline label for the number fields on the AntiAttacker rows, which sit in a
+   .bar rather than a .field and so are not covered by the label rule above. */
+.lbl { font-size: 12px; color: var(--text-muted, #909399); white-space: nowrap; }
 </style>

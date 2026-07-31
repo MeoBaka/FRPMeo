@@ -252,12 +252,13 @@ func plainRules(rules []compiledRule) []Rule {
 }
 
 type state struct {
-	Enabled     *bool          `json:"enabled,omitempty"` // nil = enabled
-	ControlPort bool           `json:"controlPort"`
-	WebPort     bool           `json:"webPort"`
-	Default     string         `json:"default"`
-	Rules       []Rule         `json:"rules"`
-	Provider    ProviderConfig `json:"provider"`
+	Enabled      *bool              `json:"enabled,omitempty"` // nil = enabled
+	ControlPort  bool               `json:"controlPort"`
+	WebPort      bool               `json:"webPort"`
+	Default      string             `json:"default"`
+	Rules        []Rule             `json:"rules"`
+	Provider     ProviderConfig     `json:"provider"`
+	AntiAttacker AntiAttackerConfig `json:"antiAttacker"`
 }
 
 // Config is the whole of what the firewall is told, and the whole of what it
@@ -277,6 +278,9 @@ type Config struct {
 	Default  string         `json:"default"`
 	Rules    []Rule         `json:"rules"`
 	Provider ProviderConfig `json:"provider"`
+	// AntiAttacker rate-limits sources that the rules and the provider already
+	// let through. Off by default; see AntiAttackerConfig.
+	AntiAttacker AntiAttackerConfig `json:"antiAttacker"`
 }
 
 type repEntry struct {
@@ -313,6 +317,15 @@ type Firewall struct {
 	repMu       sync.Mutex
 	repCache    map[string]repEntry
 	repInFlight map[string]chan struct{}
+
+	// aa and its two limiters are the rate-limiting half. aaTrusted is the
+	// compiled form of HTTP.TrustedProxies, parsed on config change so a
+	// per-request path never parses strings.
+	aa          AntiAttackerConfig
+	aaTrusted   []netip.Prefix
+	tcpLimiter  *limiter
+	httpLimiter *limiter
+	udpLimiter  *udpLimiter
 }
 
 // New loads firewall state from path and starts a background expiry sweeper.
@@ -324,6 +337,9 @@ func New(path string) (*Firewall, error) {
 		def:         "allow",
 		repCache:    make(map[string]repEntry),
 		repInFlight: make(map[string]chan struct{}),
+		tcpLimiter:  newLimiter(nil),
+		httpLimiter: newLimiter(nil),
+		udpLimiter:  newUDPLimiter(nil),
 	}
 	b, err := os.ReadFile(path)
 	switch {
@@ -338,6 +354,7 @@ func New(path string) (*Firewall, error) {
 		f.def = orDefault(strings.ToLower(s.Default), "allow")
 		f.rules = compileRules(s.Rules)
 		f.provider = s.Provider
+		f.aa = s.AntiAttacker
 	case os.IsNotExist(err):
 	default:
 		return nil, err
@@ -348,6 +365,7 @@ func New(path string) (*Firewall, error) {
 	f.mu.Lock()
 	f.pruneLocked()
 	f.buildClientLocked()
+	f.applyAntiAttackerLocked(f.aa)
 	_ = f.saveLocked()
 	f.mu.Unlock()
 
@@ -620,6 +638,7 @@ func (f *Firewall) Snapshot() Config {
 	return Config{
 		Enabled: f.enabled, ControlPort: f.controlPort, WebPort: f.webPort,
 		Default: f.def, Rules: plainRules(f.rules), Provider: f.provider,
+		AntiAttacker: f.aa,
 	}
 }
 
@@ -642,10 +661,90 @@ func (f *Firewall) SetConfig(c Config) error {
 	f.rules = compileRules(c.Rules)
 	f.provider = provider
 	f.buildClientLocked()
+	f.applyAntiAttackerLocked(c.AntiAttacker)
 	f.repMu.Lock()
 	f.repCache = make(map[string]repEntry)
 	f.repMu.Unlock()
 	return f.saveLocked()
+}
+
+// applyAntiAttackerLocked stores a normalized config and compiles the trusted
+// proxy list. Counters are dropped whenever the settings change: they were
+// accumulated against different thresholds, and keeping them could hold someone
+// in a ban that the new settings would never have handed out.
+func (f *Firewall) applyAntiAttackerLocked(c AntiAttackerConfig) {
+	f.aa = c.normalize()
+	f.aaTrusted = compileTrusted(f.aa.HTTP.TrustedProxies)
+	f.tcpLimiter.reset()
+	f.httpLimiter.reset()
+	f.udpLimiter.reset()
+}
+
+// AdmitTCP rate-limits one accepted user connection, after the rules and the
+// provider have allowed it. user and proxyName say which proxy it arrived on,
+// so a config scoped to named proxies can skip the rest.
+//
+// Callers should close a refused connection with RST rather than a graceful
+// close - see netpkg.CloseWithReset. A refusal that leaves a socket in
+// TIME_WAIT for two minutes is a poor answer to a flood.
+func (f *Firewall) AdmitTCP(remoteAddr, user, proxyName string) Verdict {
+	f.mu.RLock()
+	p := f.aa.TCP
+	on := f.enabled && f.aa.Enabled && p.Enabled && f.aa.appliesTo(user, proxyName)
+	f.mu.RUnlock()
+	if !on {
+		return verdictAllow
+	}
+	return f.tcpLimiter.admit(clientKey(remoteAddr, "", nil), p)
+}
+
+// AdmitHTTP rate-limits one request served by the vhost reverse proxy. xff is
+// the raw X-Forwarded-For header, which is only believed when the peer is a
+// configured trusted proxy.
+//
+// Per request rather than per connection because the reverse proxy pools work
+// connections by route: checking at connection setup would wave through every
+// request that landed on an already-open one.
+func (f *Firewall) AdmitHTTP(remoteAddr, xff, user, proxyName string) Verdict {
+	f.mu.RLock()
+	p := f.aa.HTTP.RateProfile
+	trusted := f.aaTrusted
+	on := f.enabled && f.aa.Enabled && p.Enabled && f.aa.appliesTo(user, proxyName)
+	f.mu.RUnlock()
+	if !on {
+		return verdictAllow
+	}
+	return f.httpLimiter.admit(clientKey(remoteAddr, xff, trusted), p)
+}
+
+// AdmitUDP rate-limits one UDP packet of size bytes, for the udp and pe proxies
+// and the udp half of tcp+udp. It reports whether to forward the packet; a
+// refusal is a silent drop, since UDP has no way to say no.
+//
+// Returns a bool rather than a Verdict: there is nowhere for a reason or a
+// retry hint to go, and this runs per packet.
+func (f *Firewall) AdmitUDP(remoteAddr string, size int, user, proxyName string) bool {
+	f.mu.RLock()
+	p := f.aa.UDP
+	on := f.enabled && f.aa.Enabled && p.Enabled && f.aa.appliesTo(user, proxyName)
+	f.mu.RUnlock()
+	if !on {
+		return true
+	}
+	return f.udpLimiter.admit(clientKey(remoteAddr, "", nil), size, p)
+}
+
+// RetryAfterSeconds is what an HTTP 429 should advertise for this verdict: the
+// configured override when set, otherwise however long the source actually has
+// to wait, rounded up so a client that obeys it does not come back too early.
+func (f *Firewall) RetryAfterSeconds(v Verdict) int {
+	f.mu.RLock()
+	override := f.aa.HTTP.RetryAfterSec
+	f.mu.RUnlock()
+	if override > 0 {
+		return override
+	}
+	return max(int((v.RetryAfter+time.Second-1)/time.Second), 1)
 }
 
 // --- internals (call with f.mu held) ---
@@ -719,6 +818,7 @@ func (f *Firewall) saveLocked() error {
 	s := state{
 		Enabled: &enabled, ControlPort: f.controlPort, WebPort: f.webPort,
 		Default: f.def, Rules: plainRules(f.rules), Provider: f.provider,
+		AntiAttacker: f.aa,
 	}
 	if s.Rules == nil {
 		s.Rules = []Rule{}

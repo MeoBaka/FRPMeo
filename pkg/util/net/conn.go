@@ -42,6 +42,49 @@ import (
 	"github.com/fatedier/frp/pkg/util/xlog"
 )
 
+// lingerSetter is what a TCP connection offers, directly or through a wrapper.
+type lingerSetter interface {
+	SetLinger(sec int) error
+}
+
+// unwrapper is implemented by the conn wrappers that keep the original around.
+type unwrapper interface {
+	Unwrap() net.Conn
+}
+
+// ArmReset makes the next Close on c send a TCP RST instead of the four-way FIN
+// handshake, and reports whether it could.
+//
+// For rejected connections rather than ordinary ones. A graceful close leaves
+// the socket that initiated it in TIME_WAIT for two maximum segment lifetimes -
+// a minute on Linux - so under a flood the side doing the refusing accumulates
+// kernel state proportional to the attack, which is the wrong way round. A
+// reset leaves nothing behind.
+//
+// It is the wrong choice for anything a person sees: a browser reads RST as a
+// network error and many clients retry harder because of it, so an http
+// rejection should be an http response instead.
+//
+// Does nothing for non-TCP transports (kcp, quic, unix sockets), where there is
+// no linger option and no TIME_WAIT to avoid.
+func ArmReset(c net.Conn) bool {
+	for range 8 { // bounded: a wrapper chain this deep is a bug, not a shape
+		if ls, ok := c.(lingerSetter); ok {
+			return ls.SetLinger(0) == nil
+		}
+		u, ok := c.(unwrapper)
+		if !ok {
+			return false
+		}
+		inner := u.Unwrap()
+		if inner == nil || inner == c {
+			return false
+		}
+		c = inner
+	}
+	return false
+}
+
 type ContextGetter interface {
 	Context() context.Context
 }
@@ -88,6 +131,13 @@ func (c *ContextConn) WithContext(ctx context.Context) {
 
 func (c *ContextConn) Context() context.Context {
 	return c.ctx
+}
+
+// Unwrap exposes the connection underneath so helpers that need the real
+// transport - ArmReset wanting a *net.TCPConn - can reach past the wrapper.
+// Embedding only promotes net.Conn's own methods, not SetLinger.
+func (c *ContextConn) Unwrap() net.Conn {
+	return c.Conn
 }
 
 type WrapReadWriteCloserConn struct {

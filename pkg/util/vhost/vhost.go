@@ -26,6 +26,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -150,7 +151,7 @@ type CreateConnFunc func(remoteAddr string) (net.Conn, error)
 
 type CreateConnByEndpointFunc func(endpoint, remoteAddr string) (net.Conn, error)
 
-// AllowFunc reports whether a request from remoteAddr may be served. It is
+// AllowFunc reports whether a request may be served. It is
 
 // consulted per request, not per connection: the reverse proxy pools work
 
@@ -158,7 +159,45 @@ type CreateConnByEndpointFunc func(endpoint, remoteAddr string) (net.Conn, error
 
 // on an already-open connection through unchecked.
 
-type AllowFunc func(remoteAddr string) bool
+//
+
+// It takes the whole request rather than the source address because a decision
+
+// may depend on headers - X-Forwarded-For behind a trusted proxy - and returns
+
+// how to word a refusal rather than a bare false, since "you are not allowed"
+
+// and "you are asking too fast" need different answers to be useful.
+
+type AllowFunc func(req *http.Request) AllowDecision
+
+// AllowDecision is one answer from AllowFunc.
+
+type AllowDecision struct {
+	Allowed bool
+
+	// StatusCode is the reply when not allowed. Zero means 403.
+
+	StatusCode int
+
+	// RetryAfterSec, when positive, is sent as Retry-After.
+
+	//
+
+	// This is the part that stops a rejection making things worse: a client
+
+	// told 429 with a wait usually waits, while one whose connection is simply
+
+	// cut reads it as a network error and comes back immediately, often
+
+	// harder. A refusal nobody backs off from is not much of a refusal.
+
+	RetryAfterSec int
+}
+
+// Allowed is the decision to serve a request.
+
+var AllowDecisionOK = AllowDecision{Allowed: true}
 
 // RouteConfig is the params used to match HTTP requests
 

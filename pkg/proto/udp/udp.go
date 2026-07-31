@@ -80,13 +80,23 @@ type SessionTracker struct {
 
 // ForwardUserConn relays packets between a public UDP socket and the work
 
-// connection channels. allow, when non-nil, is consulted for every packet's
+// connection channels. allow, when non-nil, is consulted for every packet; a
 
-// source address; a false verdict drops the packet silently (UDP has no way to
+// false verdict drops it silently (UDP has no way to signal a rejection).
 
-// signal a rejection). Callers are expected to cache their verdicts - this is
+// Callers are expected to cache their verdicts - this is the per-packet hot
 
-// the per-packet hot path.
+// path.
+
+//
+
+// It is handed the packet size as well as the source, because a byte rate is
+
+// what a UDP flood is actually made of: a thousand small packets and a thousand
+
+// large ones cost the link very differently, and only one of the two numbers
+
+// can tell them apart.
 
 func ForwardUserConn(
 	udpConn *net.UDPConn,
@@ -99,7 +109,7 @@ func ForwardUserConn(
 
 	tracker *SessionTracker,
 
-	allow func(remoteAddr string) bool,
+	allow func(remoteAddr string, packetSize int) bool,
 ) {
 	// read
 
@@ -197,7 +207,7 @@ func ForwardUserConn(
 			return
 		}
 
-		if allow != nil && remoteAddr != nil && !allow(remoteAddr.String()) {
+		if allow != nil && remoteAddr != nil && !allow(remoteAddr.String(), n) {
 			continue
 		}
 

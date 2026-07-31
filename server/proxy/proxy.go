@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"reflect"
 	"strconv"
 	"sync"
@@ -139,6 +140,26 @@ type BaseProxy struct {
 	// peer over two transports (tcp+udp).
 
 	peers *peerTracker
+
+	// visitorAuthenticated marks the proxy types whose callers had to prove a
+
+	// shared secret before their connection got this far (stcp, sudp, xtcp+xudp
+
+	// and friends). Rate limiting is skipped for them: the secret already says
+
+	// who they are, so the only thing a limit could do is throttle a tunnel that
+
+	// legitimately opens many connections.
+
+	//
+
+	// Set by startVisitorListener rather than matched against a list of type
+
+	// names, so a visitor type added later is covered without anyone
+
+	// remembering to update this.
+
+	visitorAuthenticated bool
 
 	mu sync.RWMutex
 
@@ -313,6 +334,12 @@ func (pxy *BaseProxy) startVisitorListener(secretKey string, allowUsers []string
 		return err
 	}
 
+	// Everything arriving on this listener has already satisfied secretKey and
+
+	// allowUsers, so it is exempt from rate limiting.
+
+	pxy.visitorAuthenticated = true
+
 	pxy.listeners = append(pxy.listeners, listener)
 
 	pxy.xl.Infof("%s proxy custom listen success", proxyType)
@@ -420,8 +447,36 @@ const (
 
 // listen on. Verdicts are always cached: this runs per packet.
 
-func (pxy *BaseProxy) newUDPAdmitFilter(port int) func(string) bool {
-	return pxy.newAdmitFilter("udp", port, admitVerdictTTL)
+//
+
+// Rate limiting is deliberately not cached alongside them. A cached admission
+
+// says "this source was allowed a moment ago", which is the right answer for a
+
+// rule or a plugin - they cannot change their mind about the same source - but
+
+// the whole job of a rate is to say yes and then, a few packets later, no.
+
+func (pxy *BaseProxy) newUDPAdmitFilter(port int) func(string, int) bool {
+	base := pxy.newAdmitFilter("udp", port, admitVerdictTTL)
+
+	fw := pxy.GetResourceController().Firewall
+
+	user := pxy.GetUserInfo().User
+
+	name := pxy.GetName()
+
+	if base == nil && fw == nil {
+		return nil
+	}
+
+	return func(remoteAddr string, packetSize int) bool {
+		if base != nil && !base(remoteAddr) {
+			return false
+		}
+
+		return fw == nil || fw.AdmitUDP(remoteAddr, packetSize, user, name)
+	}
 }
 
 // newHTTPAdmitFilter returns a per-request admission predicate for http
@@ -457,7 +512,45 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 		ttl = admitVerdictTTL
 	}
 
-	return pxy.newAdmitFilter("conn", port, ttl)
+	base := pxy.newAdmitFilter("conn", port, ttl)
+
+	fw := pxy.GetResourceController().Firewall
+
+	user := pxy.GetUserInfo().User
+
+	name := pxy.GetName()
+
+	return func(req *http.Request) vhost.AllowDecision {
+		// Rules and the plugin hook first: those are about who is asking, and a
+
+		// peer with no business here should be told so rather than invited back
+
+		// with a Retry-After.
+
+		if base != nil && !base(req.RemoteAddr) {
+			return vhost.AllowDecision{StatusCode: http.StatusForbidden}
+		}
+
+		if fw == nil {
+			return vhost.AllowDecisionOK
+		}
+
+		// X-Forwarded-For is passed raw; the firewall decides whether the peer
+
+		// is trusted enough for it to mean anything.
+
+		v := fw.AdmitHTTP(req.RemoteAddr, req.Header.Get("X-Forwarded-For"), user, name)
+
+		if v.Allowed {
+			return vhost.AllowDecisionOK
+		}
+
+		return vhost.AllowDecision{
+			StatusCode: http.StatusTooManyRequests,
+
+			RetryAfterSec: fw.RetryAfterSeconds(v),
+		}
+	}
 }
 
 // newAdmitFilter builds the admission predicate for the paths that bypass
@@ -592,11 +685,34 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 	defer userConn.Close()
 
+	rc := pxy.GetResourceController()
+
+	// Rate limiting comes before anything else this function does, including
+	// building the plugin content below: under a flood the whole value of the
+	// check is that refusing costs less than accepting, and work done ahead of
+	// it is work the attacker gets for free.
+	//
+	// Skipped for the visitor-authenticated types, which proved a shared secret
+	// to get here - see BaseProxy.visitorAuthenticated.
+	//
+	// The refusal closes with RST rather than a graceful FIN so the socket
+	// leaves nothing in TIME_WAIT - the deferred Close above does the closing,
+	// this only changes how. It is also silent: logging a line per rejection
+	// turns a flood into a second flood against the disk.
+
+	if fw := rc.Firewall; fw != nil && !pxy.visitorAuthenticated {
+		if v := fw.AdmitTCP(userConn.RemoteAddr().String(), pxy.GetUserInfo().User, pxy.GetName()); !v.Allowed {
+
+			netpkg.ArmReset(userConn)
+
+			return
+
+		}
+	}
+
 	cfg := pxy.configurer.GetBaseConfig()
 
 	// server plugin hook
-
-	rc := pxy.GetResourceController()
 
 	content := &plugin.NewUserConnContent{
 		User: pxy.GetUserInfo(),
@@ -628,6 +744,8 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 		if ok, reason := fw.Allow(content.RemoteAddr, dstPort); !ok {
 
 			xl.Warnf("[FW] reject %s reason: %s", content.RemoteAddr, reason)
+
+			netpkg.ArmReset(userConn)
 
 			return
 

@@ -36,6 +36,9 @@ import (
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/msg"
 	"github.com/fatedier/frp/pkg/proto/wire"
+	"github.com/fatedier/frp/pkg/util/xlog"
+	"github.com/fatedier/frp/server/controller"
+	"github.com/fatedier/frp/server/visitor"
 )
 
 func TestWorkConnStartWritesStartWorkConn(t *testing.T) {
@@ -146,4 +149,33 @@ func getStartWorkConnFromPool(t *testing.T, cfg v1.ProxyConfigurer, wireProtocol
 	require.NoError(t, <-errCh)
 
 	return startMsg
+}
+
+// Visitor-based proxies authenticate with a shared secret before their traffic
+// reaches handleUserTCPConnection, so they are exempt from rate limiting. The
+// exemption is set where the visitor listener is created rather than matched
+// against a list of type names, which is what this pins down: add another
+// visitor type and it is covered without touching the firewall code.
+func TestStartVisitorListenerMarksProxyAuthenticated(t *testing.T) {
+	pxy := &BaseProxy{
+		name: "secret-tunnel",
+		rc:   &controller.ResourceController{VisitorManager: visitor.NewManager()},
+		ctx:  context.Background(),
+		xl:   xlog.New(),
+	}
+	require.False(t, pxy.visitorAuthenticated, "a proxy starts out subject to rate limiting")
+
+	require.NoError(t, pxy.startVisitorListener("sk", []string{"bob"}, "stcp"))
+	require.True(t, pxy.visitorAuthenticated,
+		"a visitor listener must exempt its proxy: the secret already identifies the caller")
+
+	for _, l := range pxy.listeners {
+		_ = l.Close()
+	}
+}
+
+// The ordinary types keep their limits - the exemption must not leak to
+// anything that never proved a secret.
+func TestPlainProxyIsNotVisitorAuthenticated(t *testing.T) {
+	require.False(t, (&BaseProxy{}).visitorAuthenticated)
 }

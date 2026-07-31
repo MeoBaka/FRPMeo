@@ -24,12 +24,13 @@ import (
 	"github.com/fatedier/frp/server/firewall"
 )
 
-// GET /api/firewall - current firewall config (enabled, default, rules, provider).
+// GET /api/firewall - current firewall config (enabled, default, rules, provider,
+// antiAttacker).
 func (svr *Service) apiFirewallGet(w http.ResponseWriter, _ *http.Request) {
 	apiWriteJSON(w, http.StatusOK, svr.rc.Firewall.Snapshot())
 }
 
-// PUT /api/firewall - replace enabled/controlPort/default/rules/provider.
+// PUT /api/firewall - replace enabled/controlPort/default/rules/provider/antiAttacker.
 func (svr *Service) apiFirewallPut(w http.ResponseWriter, r *http.Request) {
 	var body firewall.Config
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -52,6 +53,13 @@ func (svr *Service) apiFirewallPut(w http.ResponseWriter, r *http.Request) {
 		if body.Rules[i].ID == "" {
 			body.Rules[i].ID = fwRandID()
 		}
+	}
+	// Same reasoning as the port spec above: a trusted proxy entry that does not
+	// parse would be dropped, and X-Forwarded-For would quietly stop counting
+	// real clients.
+	if err := firewall.ValidateAntiAttacker(body.AntiAttacker); err != nil {
+		apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 	if err := svr.rc.Firewall.SetConfig(body); err != nil {
 		apiWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

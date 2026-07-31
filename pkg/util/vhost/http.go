@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"time"
 
 	libio "github.com/fatedier/golib/io"
@@ -409,12 +410,28 @@ func (rp *HTTPReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 
 	rc := newreq.Context().Value(RouteConfigKey).(*RouteConfig)
 
-	if rc != nil && rc.AllowFn != nil && !rc.AllowFn(req.RemoteAddr) {
+	if rc != nil && rc.AllowFn != nil {
+		if d := rc.AllowFn(req); !d.Allowed {
 
-		http.Error(rw, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			// Retry-After first: it has to be on the ResponseWriter before
 
-		return
+			// http.Error writes the header out.
 
+			if d.RetryAfterSec > 0 {
+				rw.Header().Set("Retry-After", strconv.Itoa(d.RetryAfterSec))
+			}
+
+			code := d.StatusCode
+
+			if code == 0 {
+				code = http.StatusForbidden
+			}
+
+			http.Error(rw, http.StatusText(code), code)
+
+			return
+
+		}
 	}
 
 	if !checkRouteAuthByRequest(req, rc) {

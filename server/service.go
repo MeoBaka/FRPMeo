@@ -1036,6 +1036,12 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 
 				log.Warnf("[FW] reject control %s reason: %s", c.RemoteAddr(), reason)
 
+				// RST rather than a graceful close: a rejected peer has no use
+				// for an orderly shutdown, and TIME_WAIT sockets piling up on
+				// the side doing the rejecting is what a flood is counting on.
+
+				netpkg.ArmReset(c)
+
 				c.Close()
 
 				continue
