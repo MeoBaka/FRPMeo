@@ -903,3 +903,192 @@ func TestNormalizeKeepsIdleForgetAtLeastOneWindow(t *testing.T) {
 			c.TCP.IdleForgetMs, c.TCP.WindowMs)
 	}
 }
+
+// Two switches for one decision meant a config could read as armed and do
+// nothing. Protect is now the whole story for these three.
+func TestProtectAloneArmsControlWebSSH(t *testing.T) {
+	// Exactly what a dashboard toggle sends: Protect on, nothing else set.
+	f := newAAFirewall(t, AntiAttackerConfig{
+		Enabled: true,
+		Control: ControlProfile{Protect: true},
+		Web:     ControlProfile{Protect: true},
+		SSH:     ControlProfile{Protect: true},
+	})
+	cfg := f.Snapshot().AntiAttacker
+	for name, p := range map[string]ControlProfile{"control": cfg.Control, "web": cfg.Web, "ssh": cfg.SSH} {
+		if !p.Enabled {
+			t.Errorf("%s: Protect on but Enabled false - the switch would say yes and do nothing", name)
+		}
+		if p.MaxPerWindow <= 0 {
+			t.Errorf("%s: MaxPerWindow = %d, defaults were not filled in", name, p.MaxPerWindow)
+		}
+	}
+
+	// And it actually limits: burn the default budget, then expect a refusal.
+	addr := "1.2.3.4:1000"
+	for range cfg.SSH.MaxPerWindow {
+		f.AdmitSSH(addr)
+	}
+	if f.AdmitSSH(addr).Allowed {
+		t.Fatal("ssh gateway was not limited despite Protect being on")
+	}
+}
+
+// Enabling UDP with every ceiling left at zero would switch it on and limit
+// nothing at all.
+func TestUDPEnabledWithNoCeilingsGetsDefaults(t *testing.T) {
+	c := AntiAttackerConfig{Enabled: true, UDP: UDPProfile{Enabled: true}}.normalize()
+	if c.UDP.MaxPacketsPerWindow <= 0 || c.UDP.MaxBytesPerWindow <= 0 {
+		t.Fatalf("UDP enabled with no ceilings stayed unlimited: %+v", c.UDP)
+	}
+}
+
+// But an explicit global-only setup keeps its zeros: turning a dimension off is
+// still a choice someone can make.
+func TestUDPGlobalOnlyKeepsPerSourceUnlimited(t *testing.T) {
+	c := AntiAttackerConfig{Enabled: true, UDP: UDPProfile{
+		Enabled: true, GlobalMaxPacketsPerWindow: 10000,
+	}}.normalize()
+	if c.UDP.MaxPacketsPerWindow != 0 || c.UDP.MaxBytesPerWindow != 0 {
+		t.Fatalf("a deliberate global-only profile had per-source ceilings forced on: %+v", c.UDP)
+	}
+}
+
+// --- subnet tier ---
+
+func TestSubnetKeyDerivation(t *testing.T) {
+	cases := map[string]string{
+		"5.252.83.130":    "net:5.252.83.0/24",
+		"5.252.83.61":     "net:5.252.83.0/24", // same block, different host
+		"45.133.173.250":  "net:45.133.173.0/24",
+		"2001:db8:1:2::5": "net:2001:db8:1::/48",
+		"not-an-ip":       "",
+	}
+	for in, want := range cases {
+		if got := subnetKey(in); got != want {
+			t.Errorf("subnetKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSubnetTierOffByDefault(t *testing.T) {
+	l, _ := newTestLimiter()
+	p := testProfile() // SubnetMaxPerWindow left at 0
+
+	// Twelve different addresses in one /24, well past any subnet ceiling.
+	for i := range 12 {
+		if !l.admitBoth("10.0.0."+strconv.Itoa(i), p).Allowed {
+			t.Fatal("the subnet tier acted while SubnetMaxPerWindow was 0")
+		}
+	}
+}
+
+// The case per-source counting cannot see: one attempt from each of many
+// addresses in one block. This is what the log from the live server showed -
+// 5.252.83.0/24 with six addresses, 2.57.17.0/24 with four, each used once.
+func TestSubnetTierCatchesRotationThroughABlock(t *testing.T) {
+	l, _ := newTestLimiter()
+	p := testProfile()
+	p.MaxPerWindow = 3 // per-source: never reached, one attempt each
+	p.SubnetMaxPerWindow = 5
+
+	allowed := 0
+	for i := range 12 {
+		if l.admitBoth("5.252.83."+strconv.Itoa(i), p).Allowed {
+			allowed++
+		}
+	}
+	if allowed != 5 {
+		t.Fatalf("allowed %d of 12 addresses in one /24, want 5 (the subnet ceiling)", allowed)
+	}
+}
+
+func TestSubnetTierLeavesOtherBlocksAlone(t *testing.T) {
+	l, _ := newTestLimiter()
+	p := testProfile()
+	p.SubnetMaxPerWindow = 2
+
+	l.admitBoth("5.252.83.1", p)
+	l.admitBoth("5.252.83.2", p)
+	if l.admitBoth("5.252.83.3", p).Allowed {
+		t.Fatal("the exhausted block still admitted a third address")
+	}
+	if !l.admitBoth("45.133.173.1", p).Allowed {
+		t.Fatal("one block's ceiling refused a source from a different block")
+	}
+}
+
+// A /24 can be a carrier-grade NAT block with real users behind it, so the
+// subnet tier throttles and must never escalate to a ban.
+func TestSubnetTierNeverBans(t *testing.T) {
+	l, c := newTestLimiter()
+	p := testProfile()
+	p.SubnetMaxPerWindow = 2
+	p.BanViolations = 2 // per-source would ban after two bad windows
+
+	for range 5 { // five bad windows in a row for the block
+		for i := range 6 {
+			if v := l.admitBoth("5.252.83."+strconv.Itoa(i), p); v.Banned {
+				t.Fatal("the subnet tier issued a ban; a shared block must only be throttled")
+			}
+		}
+		c.advance(1100 * time.Millisecond)
+	}
+	// And the block is serving again immediately in a fresh window.
+	if !l.admitBoth("5.252.83.99", p).Allowed {
+		t.Fatal("the block was still refused in a new window, so something banned it")
+	}
+}
+
+// A source turned away for its neighbours' behavior has made no attempt of its
+// own, so it must not be pushed towards a ban it did not earn.
+func TestSubnetRefusalDoesNotCountAgainstTheSource(t *testing.T) {
+	l, _ := newTestLimiter()
+	p := testProfile()
+	p.MaxPerWindow = 3
+	p.SubnetMaxPerWindow = 1
+
+	l.admitBoth("5.252.83.1", p) // uses up the block's budget
+
+	// This address has never been seen; the block is what refuses it.
+	if v := l.admitBoth("5.252.83.2", p); v.Allowed {
+		t.Fatal("block ceiling did not apply")
+	}
+	// Its own counter must still be untouched: raise the block ceiling and it
+	// should get its full per-source allowance.
+	p.SubnetMaxPerWindow = 100
+	if got := admitN(l, "5.252.83.2", p, 3); got != 3 {
+		t.Fatalf("source got %d of its 3 attempts; the subnet refusal was counted against it", got)
+	}
+}
+
+func TestSubnetRefusalIsReported(t *testing.T) {
+	l, _ := newTestLimiter()
+	p := testProfile()
+	p.SubnetMaxPerWindow = 1
+
+	l.admitBoth("5.252.83.1", p)
+	v := l.admitBoth("5.252.83.2", p)
+	if v.Allowed || v.Reason != "rate limit (subnet)" {
+		t.Fatalf("verdict = %+v, want a refusal naming the subnet tier", v)
+	}
+}
+
+func TestAdmitTCPAppliesSubnetTier(t *testing.T) {
+	f := newAAFirewall(t, AntiAttackerConfig{
+		Enabled: true,
+		TCP: RateProfile{
+			Enabled: true, WindowMs: 60000, MaxPerWindow: 10,
+			BanViolations: 99, SubnetMaxPerWindow: 3,
+		},
+	})
+	allowed := 0
+	for i := range 9 { // nine addresses, one attempt each, all in one /24
+		if f.AdmitTCP("5.252.83."+strconv.Itoa(i)+":1000", "", "web").Allowed {
+			allowed++
+		}
+	}
+	if allowed != 3 {
+		t.Fatalf("allowed %d of 9 rotating addresses, want 3", allowed)
+	}
+}

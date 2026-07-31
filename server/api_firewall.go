@@ -79,3 +79,20 @@ func fwRandID() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+// GET /api/firewall/status - what AntiAttacker is doing right now: whether the
+// attack state is on, how many sources each layer is tracking, and who is
+// currently banned.
+//
+// Separate from the config endpoint because it answers a different question and
+// changes on a different timescale: the settings are edited by hand now and
+// then, this moves every second.
+func (svr *Service) apiFirewallStatusGet(w http.ResponseWriter, _ *http.Request) {
+	apiWriteJSON(w, http.StatusOK, svr.rc.Firewall.AntiAttackerStatus())
+}
+
+// DELETE /api/firewall/bans - lift every ban and forget every strike.
+func (svr *Service) apiFirewallBansDelete(w http.ResponseWriter, _ *http.Request) {
+	svr.rc.Firewall.ClearAntiAttackerBans()
+	apiWriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

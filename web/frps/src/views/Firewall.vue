@@ -228,12 +228,25 @@
           <el-input v-model.number="snap.antiAttacker.tcp.banViolations" type="number" class="w90" />
           <label class="lbl">Ban (s)</label>
           <el-input v-model.number="snap.antiAttacker.tcp.banSeconds" type="number" class="w90" />
+          <label class="lbl">Per /24 or /48</label>
+          <el-input v-model.number="snap.antiAttacker.tcp.subnetMaxPerWindow" type="number" class="w90" placeholder="0 = off" />
           <el-button @click="save" :loading="saving">Save</el-button>
         </div>
         <p class="hint" v-if="snap.antiAttacker.tcp.enabled">
           Defaults 5000 / 4 / 3 / 60 - four attempts per five seconds, banned for
           a minute once three separate windows go over. "Ban after" counts
           windows, not attempts.
+        </p>
+
+
+        <p class="hint" style="margin-top:8px">
+          "Per /24 or /48" counts every source in the same block together, and is
+          the only tier that sees a botnet rotating through one - each address
+          gets a single unremarkable attempt, so per-source counting has nothing
+          to look at. It only throttles, never bans: a /24 can be a carrier-grade
+          NAT block with a whole town behind it. To block a range outright, write
+          a deny rule instead, so it is a decision rather than a counter. Leave
+          at 0 to switch the tier off.
         </p>
 
         <el-divider content-position="left">HTTP - counted per request</el-divider>
@@ -257,6 +270,8 @@
           <el-input v-model.number="snap.antiAttacker.http.banSeconds" type="number" class="w90" />
           <label class="lbl">Retry-After (s)</label>
           <el-input v-model.number="snap.antiAttacker.http.retryAfterSec" type="number" class="w90" placeholder="auto" />
+          <label class="lbl">Per /24 or /48</label>
+          <el-input v-model.number="snap.antiAttacker.http.subnetMaxPerWindow" type="number" class="w90" placeholder="0 = off" />
           <el-button @click="save" :loading="saving">Save</el-button>
         </div>
         <div class="fg-inline" style="margin-top:12px" v-if="snap.antiAttacker.http.enabled">
@@ -274,6 +289,85 @@
             whoever is calling, so an attacker is never the same source twice.
             Behind a CDN, leaving it blank means every visitor counts as one
             source - raise the limit accordingly.
+          </span>
+        </div>
+
+
+        <el-divider content-position="left">Signals - not about volume</el-divider>
+        <div class="bar">
+          <el-switch v-model="snap.antiAttacker.strikes.enabled" @change="save" />
+          <span class="hint">
+            A rate limit asks "is this too much traffic". These ask "is this a
+            client at all", and that answer is worth far more - an frpc having a
+            bad day still speaks frp. A peer that fails the protocol, or that
+            keeps connecting and carrying nothing, is banned on the evidence
+            rather than on a threshold somebody guessed.
+          </span>
+        </div>
+        <div class="bar" style="margin-top:8px" v-if="snap.antiAttacker.strikes.enabled">
+          <label class="lbl">Protocol failures</label>
+          <el-input v-model.number="snap.antiAttacker.strikes.protocolFailures" type="number" class="w90" placeholder="0 = off" />
+          <label class="lbl">Empty connections</label>
+          <el-input v-model.number="snap.antiAttacker.strikes.emptyConnections" type="number" class="w90" placeholder="0 = off" />
+          <label class="lbl">Empty below (bytes)</label>
+          <el-input v-model.number="snap.antiAttacker.strikes.emptyBytes" type="number" class="w90" />
+          <label class="lbl">Ban (s)</label>
+          <el-input v-model.number="snap.antiAttacker.strikes.banSeconds" type="number" class="w90" />
+          <el-button @click="save" :loading="saving">Save</el-button>
+        </div>
+
+        <el-divider content-position="left">Trust - stop measuring people who already behaved</el-divider>
+        <div class="bar">
+          <el-switch v-model="snap.antiAttacker.trust.enabled" @change="save" />
+          <span class="hint">
+            This is what makes a tight limit safe to set. A connection that
+            lasted and carried real traffic earns its source an exemption, so
+            the people who actually use the tunnel stop being measured. Scans
+            and floods never qualify: they do not hold a connection open and
+            they do not send anything.
+          </span>
+        </div>
+        <div class="bar" style="margin-top:8px" v-if="snap.antiAttacker.trust.enabled">
+          <label class="lbl">After (ms)</label>
+          <el-input v-model.number="snap.antiAttacker.trust.afterMs" type="number" class="w120" />
+          <label class="lbl">Min bytes</label>
+          <el-input v-model.number="snap.antiAttacker.trust.minBytes" type="number" class="w90" />
+          <label class="lbl">Trusted for (s)</label>
+          <el-input v-model.number="snap.antiAttacker.trust.forSeconds" type="number" class="w120" />
+          <el-button @click="save" :loading="saving">Save</el-button>
+        </div>
+
+        <el-divider content-position="left">Attack state - when the blunt measures earn their cost</el-divider>
+        <div class="bar">
+          <el-switch v-model="snap.antiAttacker.attack.enabled" @change="save" />
+          <span class="hint">
+            Not a defence of its own but the switch the disruptive ones hang
+            off. Shortening the handshake timeout frees sockets five times
+            faster under a slow flood, and cuts off honest clients on bad links
+            if left on permanently - so it only applies while the connection
+            rate says an attack is happening.
+          </span>
+        </div>
+        <div class="bar" style="margin-top:8px" v-if="snap.antiAttacker.attack.enabled">
+          <label class="lbl">Connections / sec</label>
+          <el-input v-model.number="snap.antiAttacker.attack.connectionsPerSec" type="number" class="w90" />
+          <label class="lbl">Cooldown (s)</label>
+          <el-input v-model.number="snap.antiAttacker.attack.cooldownSec" type="number" class="w90" />
+          <label class="lbl">Handshake timeout (ms)</label>
+          <el-input v-model.number="snap.antiAttacker.attack.initialTimeoutMs" type="number" class="w120" placeholder="0 = leave alone" />
+          <el-button @click="save" :loading="saving">Save</el-button>
+        </div>
+
+        <el-divider content-position="left">Startup grace</el-divider>
+        <div class="bar">
+          <label class="lbl">Suspend all checks for (s) after frps starts</label>
+          <el-input v-model.number="snap.antiAttacker.graceSeconds" type="number" class="w90" />
+          <el-button @click="save" :loading="saving">Save</el-button>
+          <span class="hint">
+            A restart is a burst frps causes itself - every frpc reconnects at
+            once, each opening a login and a pool of work connections. Without
+            this the first thing a fresh server can do is ban the clients it
+            exists to serve.
           </span>
         </div>
 
@@ -298,6 +392,8 @@
           <el-input v-model.number="snap.antiAttacker.control.banViolations" type="number" class="w90" />
           <label class="lbl">Ban (s)</label>
           <el-input v-model.number="snap.antiAttacker.control.banSeconds" type="number" class="w90" />
+          <label class="lbl">Per /24 or /48</label>
+          <el-input v-model.number="snap.antiAttacker.control.subnetMaxPerWindow" type="number" class="w90" placeholder="0 = off" />
           <el-button @click="save" :loading="saving">Save</el-button>
         </div>
 
@@ -322,6 +418,8 @@
           <el-input v-model.number="snap.antiAttacker.web.banViolations" type="number" class="w90" />
           <label class="lbl">Ban (s)</label>
           <el-input v-model.number="snap.antiAttacker.web.banSeconds" type="number" class="w90" />
+          <label class="lbl">Per /24 or /48</label>
+          <el-input v-model.number="snap.antiAttacker.web.subnetMaxPerWindow" type="number" class="w90" placeholder="0 = off" />
           <el-button @click="save" :loading="saving">Save</el-button>
         </div>
 
@@ -344,6 +442,8 @@
           <el-input v-model.number="snap.antiAttacker.ssh.banViolations" type="number" class="w90" />
           <label class="lbl">Ban (s)</label>
           <el-input v-model.number="snap.antiAttacker.ssh.banSeconds" type="number" class="w90" />
+          <label class="lbl">Per /24 or /48</label>
+          <el-input v-model.number="snap.antiAttacker.ssh.subnetMaxPerWindow" type="number" class="w90" placeholder="0 = off" />
           <el-button @click="save" :loading="saving">Save</el-button>
         </div>
 
@@ -384,6 +484,39 @@
           </span>
         </div>
       </template>
+    </el-card>
+
+
+    <!-- Live status -->
+    <el-card class="section" shadow="never" v-if="snap.antiAttacker.enabled">
+      <div class="bar" style="justify-content:space-between">
+        <div class="card-title" style="margin:0">Currently blocking</div>
+        <div class="bar">
+          <el-tag v-if="status.inGrace" type="warning" disable-transitions>startup grace</el-tag>
+          <el-tag v-if="status.underAttack" type="danger" disable-transitions>under attack</el-tag>
+          <el-button size="small" @click="loadStatus" :loading="statusLoading">Refresh</el-button>
+          <el-button size="small" type="danger" @click="clearBans" :disabled="!status.bans.length">Lift all bans</el-button>
+        </div>
+      </div>
+      <p class="hint">
+        Everything above is deliberately quiet - a refusal writes no log line,
+        since a flood being turned away must not become a flood of writes. This
+        is how to tell a working configuration from one that is off, and who is
+        being turned away.
+      </p>
+      <div class="bar" style="margin-top:8px">
+        <span class="hint">Trusted sources: {{ status.trusted }}</span>
+        <span class="hint">Open connections tracked: {{ status.openConns }}</span>
+        <span class="hint" v-for="(n, k) in status.tracked" :key="k">{{ k }}: {{ n }}</span>
+      </div>
+      <el-table :data="status.bans" style="margin-top:12px" empty-text="Nothing is being blocked right now">
+        <el-table-column label="Source" prop="source" min-width="150" />
+        <el-table-column label="Layer" prop="tier" width="110" />
+        <el-table-column label="Reason" prop="reason" min-width="140" />
+        <el-table-column label="Ends in" width="110">
+          <template #default="{ row }">{{ row.secondsLeft }}s</template>
+        </el-table-column>
+      </el-table>
     </el-card>
 
     <!-- Add/Edit rule dialog -->
@@ -433,6 +566,11 @@ interface RateProfile {
   enabled: boolean
   windowMs: number; maxPerWindow: number; banViolations: number; banSeconds: number
   idleForgetMs: number; maxTracked: number
+  // 0 = off. Counts every source in the same /24 (or /48) together, which is
+  // the only tier that sees a botnet rotating through a block.
+  subnetMaxPerWindow: number
+  globalMaxPerWindow: number
+  maxConcurrent: number
 }
 interface HTTPProfile extends RateProfile { trustedProxies: string[]; retryAfterSec: number }
 // UDP is its own shape: two dimensions, a global tier, and no ban - a forged
@@ -453,6 +591,18 @@ interface AntiAttacker {
   // Three separate doors into frps, three budgets: hammering one must not
   // spend another's.
   control: ControlProfile; web: ControlProfile; ssh: ControlProfile
+  graceSeconds: number
+  attack: { enabled: boolean; connectionsPerSec: number; cooldownSec: number; initialTimeoutMs: number }
+  trust: { enabled: boolean; afterMs: number; minBytes: number; forSeconds: number; maxTracked: number }
+  strikes: {
+    enabled: boolean; protocolFailures: number; emptyConnections: number
+    emptyBytes: number; banSeconds: number; forgetMs: number; maxTracked: number
+  }
+}
+interface BanEntry { source: string; tier: string; reason: string; secondsLeft: number }
+interface FwStatus {
+  underAttack: boolean; inGrace: boolean
+  tracked: Record<string, number>; trusted: number; openConns: number; bans: BanEntry[]
 }
 interface Snap {
   enabled: boolean; controlPort: boolean; webPort: boolean; default: string
@@ -472,17 +622,23 @@ function defAntiAttacker(): AntiAttacker {
     proxies: [],
     // Both profiles ship enabled so that turning the feature on does something.
     // The master switch above is what keeps it off until asked for.
-    tcp: { enabled: true, windowMs: 5000, maxPerWindow: 4, banViolations: 3, banSeconds: 60, idleForgetMs: 40000, maxTracked: 65536 },
-    http: { enabled: true, windowMs: 10000, maxPerWindow: 120, banViolations: 5, banSeconds: 120, idleForgetMs: 60000, maxTracked: 65536, trustedProxies: [], retryAfterSec: 0 },
+    tcp: { enabled: true, windowMs: 5000, maxPerWindow: 4, banViolations: 3, banSeconds: 60, idleForgetMs: 40000, maxTracked: 65536, subnetMaxPerWindow: 0, globalMaxPerWindow: 0, maxConcurrent: 0 },
+    http: { enabled: true, windowMs: 10000, maxPerWindow: 120, banViolations: 5, banSeconds: 120, idleForgetMs: 60000, maxTracked: 65536, subnetMaxPerWindow: 0, globalMaxPerWindow: 0, maxConcurrent: 0, trustedProxies: [], retryAfterSec: 0 },
     // Per-source rates from XCord's during-login anti-ddos settings. The global
     // ceilings stay at zero: no default can guess a host's capacity.
     udp: { enabled: true, windowMs: 1000, maxPacketsPerWindow: 500, maxBytesPerWindow: 50000, globalMaxPacketsPerWindow: 0, globalMaxBytesPerWindow: 0, idleForgetMs: 30000, maxTracked: 65536 },
     // Far looser than tcp: a frpc pool is many connections from one address.
-    control: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 200, banViolations: 3, banSeconds: 60, idleForgetMs: 40000, maxTracked: 65536 },
+    control: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 200, banViolations: 3, banSeconds: 60, idleForgetMs: 40000, maxTracked: 65536, subnetMaxPerWindow: 0, globalMaxPerWindow: 0, maxConcurrent: 0 },
     // Tighter than control - a login form, not a pool - with a long ban, since
     // nothing legitimate trips it.
-    web: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 60, banViolations: 3, banSeconds: 300, idleForgetMs: 60000, maxTracked: 65536 },
-    ssh: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 10, banViolations: 3, banSeconds: 300, idleForgetMs: 60000, maxTracked: 65536 },
+    web: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 60, banViolations: 3, banSeconds: 300, idleForgetMs: 60000, maxTracked: 65536, subnetMaxPerWindow: 0, globalMaxPerWindow: 0, maxConcurrent: 0 },
+    graceSeconds: 60,
+    // Off by default, every one of them: each costs something when wrong, and
+    // none should start acting because somebody flipped the master switch.
+    attack: { enabled: false, connectionsPerSec: 40, cooldownSec: 60, initialTimeoutMs: 2000 },
+    trust: { enabled: false, afterMs: 300000, minBytes: 4096, forSeconds: 86400, maxTracked: 65536 },
+    strikes: { enabled: false, protocolFailures: 3, emptyConnections: 6, emptyBytes: 64, banSeconds: 600, forgetMs: 3600000, maxTracked: 65536 },
+    ssh: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 10, banViolations: 3, banSeconds: 300, idleForgetMs: 60000, maxTracked: 65536, subnetMaxPerWindow: 0, globalMaxPerWindow: 0, maxConcurrent: 0 },
   }
 }
 
@@ -493,6 +649,45 @@ function linesToList(t: string): string[] {
 
 const loading = ref(false)
 const saving = ref(false)
+const statusLoading = ref(false)
+
+// Live state, refreshed on demand rather than polled: it is a diagnostic, and a
+// timer on every open dashboard would be its own small flood.
+const status = reactive<FwStatus>({
+  underAttack: false, inGrace: false, tracked: {}, trusted: 0, openConns: 0, bans: [],
+})
+
+async function loadStatus() {
+  statusLoading.value = true
+  try {
+    const s = await http.get<FwStatus>('../api/firewall/status')
+    status.underAttack = !!s.underAttack
+    status.inGrace = !!s.inGrace
+    status.tracked = s.tracked || {}
+    status.trusted = s.trusted || 0
+    status.openConns = s.openConns || 0
+    status.bans = s.bans || []
+  } catch (e: any) {
+    ElMessage.error('Status failed: ' + (e.message || e))
+  } finally {
+    statusLoading.value = false
+  }
+}
+
+async function clearBans() {
+  try {
+    await ElMessageBox.confirm('Lift every ban and forget every strike? Trust is kept.', 'Confirm', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await http.delete('../api/firewall/bans')
+    ElMessage.success('Bans lifted')
+    await loadStatus()
+  } catch (e: any) {
+    ElMessage.error('Failed: ' + (e.message || e))
+  }
+}
 const snap = reactive<Snap>({ enabled: true, controlPort: false, webPort: false, default: 'allow', rules: [], provider: defProvider(), antiAttacker: defAntiAttacker() })
 
 const proxiesText = computed({
@@ -566,6 +761,9 @@ async function load() {
       control: { ...aaDef.control, ...(aa.control || {}) },
       web: { ...aaDef.web, ...(aa.web || {}) },
       ssh: { ...aaDef.ssh, ...(aa.ssh || {}) },
+      attack: { ...aaDef.attack, ...(aa.attack || {}) },
+      trust: { ...aaDef.trust, ...(aa.trust || {}) },
+      strikes: { ...aaDef.strikes, ...(aa.strikes || {}) },
     }
   } catch (e: any) {
     ElMessage.error('Load failed: ' + (e.message || e))
@@ -655,7 +853,12 @@ async function moveUp(i: number) {
   await applyRules('Order updated', undo)
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  if (snap.antiAttacker.enabled) {
+    await loadStatus()
+  }
+})
 </script>
 
 <style scoped>

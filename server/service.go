@@ -1114,10 +1114,30 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 
 			var isTLS, custom bool
 
-			c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, connReadTimeout)
+			// Shortened while under attack: a peer that opens a connection and
+			// says nothing holds a socket for the whole timeout, and that is
+			// what a slow flood is made of.
+
+			timeout := connReadTimeout
+
+			if svr.rc.Firewall != nil {
+				timeout = svr.rc.Firewall.HandshakeTimeout(timeout)
+			}
+
+			c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, timeout)
 			if err != nil {
 
 				log.Warnf("client conn [%s] failed the TLS check: %v", originConn.RemoteAddr(), err)
+
+				// Not an frpc having a bad day: something that does not speak
+				// the protocol at all. Worth more than any amount of counting,
+				// so it goes straight to the strike ledger.
+
+				if svr.rc.Firewall != nil {
+					svr.rc.Firewall.ReportProtocolFailure(originConn.RemoteAddr().String())
+				}
+
+				netpkg.ArmReset(originConn)
 
 				originConn.Close()
 
@@ -1288,7 +1308,17 @@ func (svr *Service) RegisterControl(
 	}
 
 	if err := authVerifier.VerifyLogin(loginMsg); err != nil {
+
+		// A wrong token is the same class of evidence as a wrong protocol: an
+		// frpc that belongs here knows the secret. Internal connections - the
+		// ssh gateway's own pipe - are exempt, having never been remote peers.
+
+		if !internal && svr.rc.Firewall != nil && ctlConn != nil {
+			svr.rc.Firewall.ReportProtocolFailure(ctlConn.RemoteAddr().String())
+		}
+
 		return nil, err
+
 	}
 
 	ctl, err := NewControl(ctx, &SessionContext{

@@ -89,15 +89,111 @@ type AntiAttackerConfig struct {
 	// form would leave a password guesser almost unhindered.
 	Web ControlProfile `json:"web"`
 	SSH ControlProfile `json:"ssh"`
+
+	// GraceSeconds suspends every check for a while after frps starts.
+	//
+	// A restart is a burst that frps causes itself: every frpc reconnects at
+	// once, each opening a login and a pool of work connections. Without a
+	// grace period the first thing a fresh server can do is ban the clients it
+	// exists to serve, and the tunnels stay down until the ban expires.
+	GraceSeconds int `json:"graceSeconds"`
+
+	// Attack decides when the expensive, blunter measures are worth their cost.
+	Attack AttackConfig `json:"attack"`
+
+	// Trust exempts sources that have already behaved.
+	Trust TrustConfig `json:"trust"`
+
+	// Strikes acts on signals that are not about volume at all.
+	Strikes StrikeConfig `json:"strikes"`
+}
+
+// AttackConfig is the switch the blunt measures hang off.
+//
+// Most of what follows costs something - a shorter timeout cuts off slow but
+// honest clients, dropped logs hide detail - so none of it is on all the time.
+// This decides when "all the time" has arrived.
+type AttackConfig struct {
+	Enabled bool `json:"enabled"`
+	// ConnectionsPerSec is the rate, counted across every source together, at
+	// which frps starts calling this an attack.
+	ConnectionsPerSec int `json:"connectionsPerSec"`
+	// CooldownSec is how long the rate has to stay below the threshold before
+	// things go back to normal. Without it a flood pacing itself around the
+	// line would flip the state back and forth continuously.
+	CooldownSec int `json:"cooldownSec"`
+	// InitialTimeoutMs replaces the handshake read timeout while under attack.
+	// Zero leaves it alone.
+	//
+	// This is the cheapest slowloris defense there is: a peer that opens a
+	// connection and says nothing holds a socket for the whole timeout, so
+	// cutting ten seconds to two frees them five times faster. It is also the
+	// most disruptive if left on permanently, which is why it lives here.
+	InitialTimeoutMs int `json:"initialTimeoutMs"`
+}
+
+// TrustConfig exempts a source that has already proved itself.
+//
+// This is what makes a tight limit safe to set. Without it every threshold is a
+// compromise between turning away real users and letting attackers through;
+// with it, the people who actually use the tunnel stop being measured at all.
+type TrustConfig struct {
+	Enabled bool `json:"enabled"`
+	// AfterMs is how long a single connection has to last, carrying real
+	// traffic, before its source is trusted. Scans and floods do not hold a
+	// connection open and do not send anything - that is what separates them.
+	AfterMs int `json:"afterMs"`
+	// MinBytes is how much that connection has to have carried. A connection
+	// held open but silent is a slowloris, not a user.
+	MinBytes int `json:"minBytes"`
+	// ForSeconds is how long the exemption lasts.
+	ForSeconds int `json:"forSeconds"`
+	MaxTracked int `json:"maxTracked,omitempty"`
+}
+
+// StrikeConfig bans on signals that say something a rate never can.
+//
+// A rate limit answers "is this too much traffic". These answer "is this a
+// client at all", and the answer is worth far more: a peer that speaks the
+// wrong protocol on the control port is not an frpc having a bad day. One
+// strike here is worth a hundred connections of counting.
+type StrikeConfig struct {
+	Enabled bool `json:"enabled"`
+	// ProtocolFailures is how many times a peer may fail to speak frp's
+	// protocol - a non-TLS connection to a TLS-only port, a login that does not
+	// verify - before it is banned. Zero switches this off.
+	ProtocolFailures int `json:"protocolFailures"`
+	// EmptyConnections is how many times a peer may connect, carry almost
+	// nothing and leave, before it is banned. Zero switches this off.
+	//
+	// This is what a port scanner looks like, and it is invisible to a rate
+	// limit: six connections spread over sixteen hours is nothing to count, but
+	// six connections that each moved fifty bytes is not somebody using a
+	// service.
+	EmptyConnections int `json:"emptyConnections"`
+	// EmptyBytes is the size below which a finished connection counts as empty.
+	EmptyBytes int `json:"emptyBytes"`
+	// BanSeconds is how long a strike ban lasts. Longer than a rate-limit ban
+	// by default: this fires on evidence, not on a threshold somebody guessed.
+	BanSeconds int `json:"banSeconds"`
+	// ForgetMs drops a source's strikes once it has been quiet this long, so a
+	// single bad day never adds up over weeks.
+	ForgetMs   int `json:"forgetMs"`
+	MaxTracked int `json:"maxTracked,omitempty"`
 }
 
 // ControlProfile is the TCP shape again, plus the switch that arms it.
 type ControlProfile struct {
 	RateProfile
 
-	// Enabled on RateProfile turns the counting on; this says the control port
-	// is in scope at all. Both are needed, so enabling AntiAttacker for proxies
-	// never quietly starts refusing frpc clients.
+	// Protect is the only switch these three answer to, and the embedded
+	// RateProfile.Enabled is kept equal to it by normalize.
+	//
+	// Two flags were one too many. A stored config carries Enabled=false until
+	// something sets it, so a config that arrived with only Protect turned on
+	// would have read as armed and done nothing - the switch says yes and
+	// nothing happens, which is the failure mode worth designing out rather
+	// than documenting.
 	Protect bool `json:"protect"`
 }
 
@@ -167,6 +263,40 @@ type RateProfile struct {
 	IdleForgetMs int `json:"idleForgetMs"`
 	// MaxTracked caps how many sources are remembered at once.
 	MaxTracked int `json:"maxTracked,omitempty"`
+
+	// SubnetMaxPerWindow counts every source in the same block together - /24
+	// for IPv4, /48 for IPv6 - as a second limit alongside the per-source one.
+	// Zero, the default, leaves the tier off.
+	//
+	// It exists because a botnet does not need one address twice. Rotating
+	// through a /24 gives every address a single, entirely unremarkable
+	// attempt, and per-source counting has nothing to see. The block is what
+	// stays the same.
+	//
+	// Unlike the per-source tier this one only ever throttles: it never bans.
+	// A /24 can be a carrier-grade NAT block with a whole town behind it, and
+	// banning the one address an attacker used would take the town with it.
+	// Blocking a range outright is what a deny rule is for - that way it is
+	// something a person decided, not something a counter did.
+	SubnetMaxPerWindow int `json:"subnetMaxPerWindow,omitempty"`
+
+	// GlobalMaxPerWindow counts every source together, and is the last tier
+	// that still means anything when an attack is spread widely enough that no
+	// address and no block repeats. Zero leaves it off.
+	//
+	// Like the subnet tier it only throttles. Once it bites it is turning away
+	// real traffic along with the rest - it bounds the damage rather than
+	// telling good from bad, so the number wants to be near what the host can
+	// actually carry, not near normal load.
+	GlobalMaxPerWindow int `json:"globalMaxPerWindow,omitempty"`
+
+	// MaxConcurrent caps how many connections one source may hold open at once.
+	// Zero leaves it off.
+	//
+	// A different axis from everything above: the rate tiers count connections
+	// being *made*, and a peer that opens a thousand and then goes quiet breaks
+	// no rate at all. That is slowloris, and only a concurrency cap sees it.
+	MaxConcurrent int `json:"maxConcurrent,omitempty"`
 }
 
 // HTTPProfile adds what only makes sense once there are requests and headers.
@@ -273,6 +403,14 @@ func defaultSSHProfile() RateProfile {
 	}
 }
 
+// normalizeWith fills the numbers in and ties Enabled to Protect, so the one
+// switch in the dashboard is the whole story.
+func (p ControlProfile) normalizeWith(def RateProfile) ControlProfile {
+	p.RateProfile = p.normalize(def)
+	p.Enabled = p.Protect
+	return p
+}
+
 // defaultUDPProfile takes its per-source rates from XCord's during-login
 // anti-ddos settings (500 packets/s, 50000 bytes/s), which is the closest thing
 // to a figure tested against real traffic. The global caps stay at zero: see
@@ -287,9 +425,18 @@ func defaultUDPProfile() UDPProfile {
 	}
 }
 
-// normalize fills in zero fields with the defaults, leaving the ceilings alone:
-// a zero there means "do not limit this dimension" and is a real choice.
+// normalize fills in the zero fields with the defaults. The ceilings are left
+// alone, because a zero there means "do not limit this dimension" and is a real
+// choice - except when every one of them is zero, which would leave the profile
+// switched on and limiting nothing. Nobody enables a rate limit to ask for no
+// rate limit, so that case takes the per-source defaults; turning a dimension
+// off is still available by setting the other one and leaving this at zero.
 func (p UDPProfile) normalize(def UDPProfile) UDPProfile {
+	if p.Enabled && p.MaxPacketsPerWindow <= 0 && p.MaxBytesPerWindow <= 0 &&
+		p.GlobalMaxPacketsPerWindow <= 0 && p.GlobalMaxBytesPerWindow <= 0 {
+		p.MaxPacketsPerWindow = def.MaxPacketsPerWindow
+		p.MaxBytesPerWindow = def.MaxBytesPerWindow
+	}
 	if p.WindowMs <= 0 {
 		p.WindowMs = def.WindowMs
 	}
@@ -335,6 +482,95 @@ func (p RateProfile) normalize(def RateProfile) RateProfile {
 	return p
 }
 
+// Defaults for the three coordinating pieces.
+//
+// The attack threshold is XCord's anti-bot-activate-connections unchanged (40
+// connections in a second), and the cooldown its anti-bot-deactivate-delay. The
+// shortened timeout is its anti-hang force-timeout-time.
+//
+// The strike numbers are not from XCord - it has no equivalent, because a
+// Minecraft server can tell a bot from a player by asking it questions and frps
+// cannot. They are set low on purpose: unlike a rate, these fire on evidence
+// that a peer is not a client at all, so there is little reason to be patient.
+func defaultAttack() AttackConfig {
+	return AttackConfig{ConnectionsPerSec: 40, CooldownSec: 60, InitialTimeoutMs: 2000}
+}
+
+func defaultTrust() TrustConfig {
+	// Five minutes of real use, XCord's time-to-whitelist, buying a day's
+	// exemption. XCord grants thirty days; a day is the same idea with less to
+	// regret if the address changes hands.
+	return TrustConfig{AfterMs: 300000, MinBytes: 4096, ForSeconds: 86400, MaxTracked: 65536}
+}
+
+func defaultStrikes() StrikeConfig {
+	return StrikeConfig{
+		ProtocolFailures: 3,
+		EmptyConnections: 6,
+		EmptyBytes:       64,
+		BanSeconds:       600,
+		ForgetMs:         3600000,
+		MaxTracked:       65536,
+	}
+}
+
+func (c AttackConfig) normalize(def AttackConfig) AttackConfig {
+	if c.ConnectionsPerSec <= 0 {
+		c.ConnectionsPerSec = def.ConnectionsPerSec
+	}
+	if c.CooldownSec <= 0 {
+		c.CooldownSec = def.CooldownSec
+	}
+	if c.InitialTimeoutMs < 0 {
+		c.InitialTimeoutMs = 0
+	}
+	return c
+}
+
+func (c TrustConfig) normalize(def TrustConfig) TrustConfig {
+	if c.AfterMs <= 0 {
+		c.AfterMs = def.AfterMs
+	}
+	if c.MinBytes <= 0 {
+		c.MinBytes = def.MinBytes
+	}
+	if c.ForSeconds <= 0 {
+		c.ForSeconds = def.ForSeconds
+	}
+	if c.MaxTracked <= 0 {
+		c.MaxTracked = def.MaxTracked
+	}
+	return c
+}
+
+func (c StrikeConfig) normalize(def StrikeConfig) StrikeConfig {
+	if c.ProtocolFailures < 0 {
+		c.ProtocolFailures = 0
+	}
+	if c.EmptyConnections < 0 {
+		c.EmptyConnections = 0
+	}
+	// Both at zero with the group switched on would be a switch that does
+	// nothing - the same trap the udp ceilings had.
+	if c.Enabled && c.ProtocolFailures == 0 && c.EmptyConnections == 0 {
+		c.ProtocolFailures = def.ProtocolFailures
+		c.EmptyConnections = def.EmptyConnections
+	}
+	if c.EmptyBytes <= 0 {
+		c.EmptyBytes = def.EmptyBytes
+	}
+	if c.BanSeconds <= 0 {
+		c.BanSeconds = def.BanSeconds
+	}
+	if c.ForgetMs <= 0 {
+		c.ForgetMs = def.ForgetMs
+	}
+	if c.MaxTracked <= 0 {
+		c.MaxTracked = def.MaxTracked
+	}
+	return c
+}
+
 func (c AntiAttackerConfig) normalize() AntiAttackerConfig {
 	scope := strings.ToLower(strings.TrimSpace(c.Scope))
 	if scope != "selected" {
@@ -344,9 +580,15 @@ func (c AntiAttackerConfig) normalize() AntiAttackerConfig {
 	c.TCP = c.TCP.normalize(defaultTCPProfile())
 	c.HTTP.RateProfile = c.HTTP.normalize(defaultHTTPProfile().RateProfile)
 	c.UDP = c.UDP.normalize(defaultUDPProfile())
-	c.Control.RateProfile = c.Control.normalize(defaultControlProfile())
-	c.Web.RateProfile = c.Web.normalize(defaultWebProfile())
-	c.SSH.RateProfile = c.SSH.normalize(defaultSSHProfile())
+	c.Control = c.Control.normalizeWith(defaultControlProfile())
+	c.Web = c.Web.normalizeWith(defaultWebProfile())
+	c.SSH = c.SSH.normalizeWith(defaultSSHProfile())
+	c.Attack = c.Attack.normalize(defaultAttack())
+	c.Trust = c.Trust.normalize(defaultTrust())
+	c.Strikes = c.Strikes.normalize(defaultStrikes())
+	if c.GraceSeconds < 0 {
+		c.GraceSeconds = 0
+	}
 	proxies := make([]string, 0, len(c.Proxies))
 	for _, p := range c.Proxies {
 		if p = strings.TrimSpace(p); p != "" {
@@ -532,6 +774,375 @@ func (l *limiter) admit(key string, p RateProfile) Verdict {
 	}
 }
 
+// attackState tracks the connection rate across every source and says whether
+// frps is currently under attack.
+//
+// Counted in whole seconds rather than a sliding window: the number only has to
+// be right enough to flip a switch, and a second of granularity keeps this to
+// two integers on a path that every connection walks.
+type attackState struct {
+	mu       sync.Mutex
+	nowMs    func() int64
+	second   int64 // unix second the count belongs to
+	count    int
+	under    bool
+	calmFrom int64 // ms since the rate first dropped below the threshold
+}
+
+func newAttackState(nowMs func() int64) *attackState {
+	if nowMs == nil {
+		nowMs = func() int64 { return time.Now().UnixMilli() }
+	}
+	return &attackState{nowMs: nowMs}
+}
+
+// note records one connection towards the per-second rate. Whether the state is
+// up is asked separately, through isUnder, because the answer matters at points
+// that are not admitting a connection - shortening a timeout, drawing a status.
+func (a *attackState) note(c AttackConfig) {
+	if !c.Enabled || c.ConnectionsPerSec <= 0 {
+		return
+	}
+	now := a.nowMs()
+	sec := now / 1000
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if sec != a.second {
+		// A second finished. Judge it, then start the next one.
+		if a.count >= c.ConnectionsPerSec {
+			a.under = true
+			a.calmFrom = 0
+		} else if a.under {
+			// Below the line. Stay in the attack state until it has been quiet
+			// for the whole cooldown, so a flood pacing itself around the
+			// threshold cannot flip the state back and forth.
+			if a.calmFrom == 0 {
+				a.calmFrom = now
+			} else if now-a.calmFrom >= int64(c.CooldownSec)*1000 {
+				a.under = false
+				a.calmFrom = 0
+			}
+		}
+		a.second = sec
+		a.count = 0
+	}
+	a.count++
+}
+
+func (a *attackState) isUnder() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.under
+}
+
+func (a *attackState) reset() {
+	a.mu.Lock()
+	a.second, a.count, a.under, a.calmFrom = 0, 0, false, 0
+	a.mu.Unlock()
+}
+
+// trustStore remembers sources that have already behaved.
+type trustStore struct {
+	mu    sync.Mutex
+	until map[string]int64 // key -> ms
+	nowMs func() int64
+}
+
+func newTrustStore(nowMs func() int64) *trustStore {
+	if nowMs == nil {
+		nowMs = func() int64 { return time.Now().UnixMilli() }
+	}
+	return &trustStore{until: make(map[string]int64), nowMs: nowMs}
+}
+
+// grant records that key has earned an exemption.
+func (s *trustStore) grant(key string, c TrustConfig) {
+	if !c.Enabled || key == "" {
+		return
+	}
+	now := s.nowMs()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.until) >= c.MaxTracked {
+		for k, exp := range s.until {
+			if exp <= now {
+				delete(s.until, k)
+			}
+		}
+		if len(s.until) >= c.MaxTracked {
+			return
+		}
+	}
+	s.until[key] = now + int64(c.ForSeconds)*1000
+}
+
+func (s *trustStore) trusted(key string, c TrustConfig) bool {
+	if !c.Enabled || key == "" {
+		return false
+	}
+	now := s.nowMs()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	exp, ok := s.until[key]
+	if !ok {
+		return false
+	}
+	if exp <= now {
+		delete(s.until, key)
+		return false
+	}
+	return true
+}
+
+func (s *trustStore) size() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.until)
+}
+
+// strikeStore counts the signals that are about what a peer is rather than how
+// much of it there is, and bans on them.
+type strikeStore struct {
+	mu      sync.Mutex
+	entries map[string]*strikeEntry
+	nowMs   func() int64
+}
+
+type strikeEntry struct {
+	protocol    int
+	empty       int
+	lastSeen    int64
+	bannedUntil int64
+}
+
+func newStrikeStore(nowMs func() int64) *strikeStore {
+	if nowMs == nil {
+		nowMs = func() int64 { return time.Now().UnixMilli() }
+	}
+	return &strikeStore{entries: make(map[string]*strikeEntry), nowMs: nowMs}
+}
+
+// strikeKind names which counter an event feeds.
+type strikeKind int
+
+const (
+	strikeProtocol strikeKind = iota
+	strikeEmpty
+)
+
+// add records one strike. Whether the source is now banned is asked through
+// banned, on the admission path, rather than returned here: the callers that
+// report a strike are handling a failure and have nothing to do with the
+// answer.
+func (s *strikeStore) add(key string, kind strikeKind, c StrikeConfig) {
+	if !c.Enabled || key == "" {
+		return
+	}
+	limit := c.ProtocolFailures
+	if kind == strikeEmpty {
+		limit = c.EmptyConnections
+	}
+	if limit <= 0 {
+		return
+	}
+	now := s.nowMs()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e := s.entries[key]
+	if e == nil {
+		if len(s.entries) >= c.MaxTracked {
+			s.pruneLocked(now, c.ForgetMs)
+			if len(s.entries) >= c.MaxTracked {
+				return
+			}
+		}
+		e = &strikeEntry{}
+		s.entries[key] = e
+	}
+	// A source that has been quiet long enough starts clean, so one bad day
+	// never accumulates into a ban weeks later.
+	if e.lastSeen != 0 && now-e.lastSeen > int64(c.ForgetMs) && e.bannedUntil <= now {
+		*e = strikeEntry{}
+	}
+	e.lastSeen = now
+
+	if kind == strikeEmpty {
+		e.empty++
+		if e.empty >= limit {
+			e.bannedUntil = now + int64(c.BanSeconds)*1000
+			e.empty = 0
+		}
+	} else {
+		e.protocol++
+		if e.protocol >= limit {
+			e.bannedUntil = now + int64(c.BanSeconds)*1000
+			e.protocol = 0
+		}
+	}
+}
+
+// banned reports whether key is serving a strike ban. Like the rate limiter it
+// does not extend the ban for asking.
+func (s *strikeStore) banned(key string, c StrikeConfig) bool {
+	if !c.Enabled || key == "" {
+		return false
+	}
+	now := s.nowMs()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e := s.entries[key]
+	return e != nil && e.bannedUntil > now
+}
+
+func (s *strikeStore) pruneLocked(now int64, forgetMs int) {
+	for k, e := range s.entries {
+		if e.bannedUntil > now {
+			continue
+		}
+		if now-e.lastSeen > int64(forgetMs) {
+			delete(s.entries, k)
+		}
+	}
+}
+
+func (s *strikeStore) size() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries)
+}
+
+func (s *strikeStore) reset() {
+	s.mu.Lock()
+	s.entries = make(map[string]*strikeEntry)
+	s.mu.Unlock()
+}
+
+// concurrency counts connections a source currently holds open.
+type concurrency struct {
+	mu   sync.Mutex
+	open map[string]int
+}
+
+func newConcurrency() *concurrency {
+	return &concurrency{open: make(map[string]int)}
+}
+
+// acquire takes a slot, reporting false when the source is already at its cap.
+func (c *concurrency) acquire(key string, limit int) bool {
+	if limit <= 0 || key == "" {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.open[key] >= limit {
+		return false
+	}
+	c.open[key]++
+	return true
+}
+
+func (c *concurrency) release(key string) {
+	if key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n := c.open[key]; n > 1 {
+		c.open[key] = n - 1
+	} else {
+		delete(c.open, key)
+	}
+}
+
+func (c *concurrency) size() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.open)
+}
+
+func (c *concurrency) reset() {
+	c.mu.Lock()
+	c.open = make(map[string]int)
+	c.mu.Unlock()
+}
+
+// globalKey is the single bucket the whole-listener tier counts into. Prefixed
+// like the subnet keys so it can never be an address.
+const globalKey = "net:*"
+
+// admitBoth runs the subnet tier and then the per-source one, and is what the
+// Admit* methods call. key is the per-source key from clientKey.
+//
+// Subnet first, and its refusal returns before the per-source counter is
+// touched: a source turned away for what its neighbors are doing has not made
+// an attempt of its own, and counting it would push it towards a ban it did not
+// earn.
+func (l *limiter) admitBoth(key string, p RateProfile) Verdict {
+	// Widest tier first, narrowest last. Each one that refuses does so before
+	// the narrower counters are touched, so a source turned away for the
+	// company it keeps is not also pushed towards a ban of its own.
+	if p.GlobalMaxPerWindow > 0 {
+		gp := p
+		gp.MaxPerWindow = p.GlobalMaxPerWindow
+		gp.BanViolations = maxInt // throttle only, like the subnet tier
+		if v := l.admit(globalKey, gp); !v.Allowed {
+			v.Reason = "rate limit (global)"
+			return v
+		}
+	}
+	if p.SubnetMaxPerWindow > 0 {
+		if sk := subnetKey(key); sk != "" {
+			sp := p
+			sp.MaxPerWindow = p.SubnetMaxPerWindow
+			// The subnet tier throttles and never bans - see
+			// RateProfile.SubnetMaxPerWindow. A violation count it can never
+			// reach is how that is expressed, so the escalation simply never
+			// fires.
+			sp.BanViolations = maxInt
+			if v := l.admit(sk, sp); !v.Allowed {
+				v.Reason = "rate limit (subnet)"
+				return v
+			}
+		}
+	}
+	return l.admit(key, p)
+}
+
+const maxInt = int(^uint(0) >> 1)
+
+// subnetKey maps a source key to the block it shares with its neighbors: /24
+// for IPv4, /48 for IPv6. Returns "" when the key is not an address, which
+// leaves the subnet tier out of the decision rather than guessing.
+//
+// The "net:" prefix keeps block keys and address keys apart in the one table -
+// without it a /24 named "1.2.3.0/24" and an address could never collide, but
+// the intent would rest on that being true forever.
+func subnetKey(ipKey string) string {
+	ip, err := netip.ParseAddr(ipKey)
+	if err != nil {
+		return ""
+	}
+	bits := 24
+	if ip.Is6() && !ip.Is4In6() {
+		bits = 48
+	}
+	p, err := ip.Prefix(bits)
+	if err != nil {
+		return ""
+	}
+	return "net:" + p.String()
+}
+
 // pruneLocked drops sources that have been quiet for longer than idleMs and are
 // not serving a ban.
 func (l *limiter) pruneLocked(now int64, idleMs int) {
@@ -679,6 +1290,79 @@ func (l *udpLimiter) size() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.trackers)
+}
+
+// BanEntry is one source the firewall is currently turning away, as reported to
+// the dashboard.
+type BanEntry struct {
+	Source string `json:"source"`
+	// Tier names where the ban came from: which listener, or "strike" for the
+	// signal-based ones.
+	Tier string `json:"tier"`
+	// Reason is the short label, e.g. "rate limit" or "not a client".
+	Reason string `json:"reason"`
+	// SecondsLeft is how long is left to serve.
+	SecondsLeft int `json:"secondsLeft"`
+}
+
+// bans lists the sources currently serving a rate-limit ban in this limiter.
+//
+// Skips the aggregate buckets: a "net:" key is a block or the global counter,
+// neither of which can be banned - both tiers only ever throttle - so anything
+// with that prefix would be noise if it ever appeared.
+func (l *limiter) bans(tier string, now int64) []BanEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	out := make([]BanEntry, 0, 8)
+	for k, t := range l.trackers {
+		if t.bannedUntil <= now || strings.HasPrefix(k, "net:") {
+			continue
+		}
+		out = append(out, BanEntry{
+			Source:      k,
+			Tier:        tier,
+			Reason:      "rate limit",
+			SecondsLeft: int((t.bannedUntil - now + 999) / 1000),
+		})
+	}
+	return out
+}
+
+func (s *strikeStore) bans(now int64) []BanEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]BanEntry, 0, 8)
+	for k, e := range s.entries {
+		if e.bannedUntil <= now {
+			continue
+		}
+		out = append(out, BanEntry{
+			Source:      k,
+			Tier:        "strike",
+			Reason:      "not a client",
+			SecondsLeft: int((e.bannedUntil - now + 999) / 1000),
+		})
+	}
+	return out
+}
+
+// Status is what the dashboard shows about the live state, as opposed to the
+// settings. Counters alone would not answer the question people actually have,
+// which is "who is being turned away and why" - so the bans are listed.
+type Status struct {
+	UnderAttack bool `json:"underAttack"`
+	// InGrace is true while the post-startup window is still suppressing checks.
+	// Worth reporting: otherwise a freshly restarted server looks like one whose
+	// settings are not working.
+	InGrace bool `json:"inGrace"`
+	// Tracked is how many sources each layer is remembering, which is what
+	// approaches MaxTracked when an attack is wide enough to matter.
+	Tracked   map[string]int `json:"tracked"`
+	Trusted   int            `json:"trusted"`
+	OpenConns int            `json:"openConns"`
+	Bans      []BanEntry     `json:"bans"`
 }
 
 // clientKey picks what to count a request against: the socket address, or the

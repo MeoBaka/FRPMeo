@@ -38,6 +38,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -336,6 +337,15 @@ type Firewall struct {
 	// hammering one must not use up another's budget.
 	webLimiter *limiter
 	sshLimiter *limiter
+
+	// The pieces that are not about counting attempts: attack state, the
+	// exemption store, the strike counters and the concurrency ledger.
+	attack    *attackState
+	trust     *trustStore
+	strikes   *strikeStore
+	conc      *concurrency
+	startedAt int64 // ms, for the grace period
+	nowMsFn   func() int64
 }
 
 // New loads firewall state from path and starts a background expiry sweeper.
@@ -353,6 +363,12 @@ func New(path string) (*Firewall, error) {
 		ctlLimiter:  newLimiter(nil),
 		webLimiter:  newLimiter(nil),
 		sshLimiter:  newLimiter(nil),
+		attack:      newAttackState(nil),
+		trust:       newTrustStore(nil),
+		strikes:     newStrikeStore(nil),
+		conc:        newConcurrency(),
+		nowMsFn:     func() int64 { return time.Now().UnixMilli() },
+		startedAt:   time.Now().UnixMilli(),
 	}
 	b, err := os.ReadFile(path)
 	switch {
@@ -694,6 +710,133 @@ func (f *Firewall) applyAntiAttackerLocked(c AntiAttackerConfig) {
 	f.ctlLimiter.reset()
 	f.webLimiter.reset()
 	f.sshLimiter.reset()
+	f.attack.reset()
+	f.conc.reset()
+	// Trust and strikes survive a config change on purpose. Both are records of
+	// what a source actually did, not counters accumulated against a threshold
+	// that just moved - throwing them away would re-measure people who had
+	// already earned their exemption, and forgive peers caught red-handed.
+}
+
+// inGrace reports whether frps is still inside the window after startup where
+// no check applies. Called with no lock held; startedAt never changes.
+func (f *Firewall) inGrace(grace int) bool {
+	return grace > 0 && f.nowMsFn()-f.startedAt < int64(grace)*1000
+}
+
+// exempt gathers the three ways an admission decision can be skipped entirely,
+// so every Admit* answers them the same way and in the same order.
+//
+// Grace first: a server that has just started has no business banning anybody,
+// least of all the clients reconnecting to it. Then trust, which is a source
+// that already proved itself. Only then is a strike ban consulted - it comes
+// last of the three because unlike the others it is a refusal, not a pass.
+func (f *Firewall) exempt(key string, c AntiAttackerConfig) (skip bool, refuse bool) {
+	if f.inGrace(c.GraceSeconds) {
+		return true, false
+	}
+	if f.trust.trusted(key, c.Trust) {
+		return true, false
+	}
+	if f.strikes.banned(key, c.Strikes) {
+		return false, true
+	}
+	return false, false
+}
+
+var verdictStruck = Verdict{Reason: "struck (not a client)"}
+
+// IsUnderAttack reports whether the connection rate has crossed the threshold
+// that makes the blunter measures worth their cost.
+func (f *Firewall) IsUnderAttack() bool {
+	f.mu.RLock()
+	on := f.enabled && f.aa.Enabled && f.aa.Attack.Enabled
+	f.mu.RUnlock()
+	return on && f.attack.isUnder()
+}
+
+// HandshakeTimeout returns how long to wait for a peer to say something,
+// shortening the caller's default while under attack.
+//
+// A connection that opens and stays silent costs a socket for the whole
+// timeout, so this is the cheapest answer to a slow flood there is. It is also
+// the one that would hurt honest clients on bad links if it were permanent,
+// which is why it only applies while the attack state is on.
+func (f *Firewall) HandshakeTimeout(def time.Duration) time.Duration {
+	f.mu.RLock()
+	ms := f.aa.Attack.InitialTimeoutMs
+	on := f.enabled && f.aa.Enabled && f.aa.Attack.Enabled
+	f.mu.RUnlock()
+	if !on || ms <= 0 || !f.attack.isUnder() {
+		return def
+	}
+	if d := time.Duration(ms) * time.Millisecond; d < def {
+		return d
+	}
+	return def
+}
+
+// ReportProtocolFailure records that a peer failed to speak frp's protocol - a
+// non-TLS connection to a TLS-only port, a login that did not verify.
+//
+// Worth more than any amount of counting: an frpc having a bad day still speaks
+// frp. Something that does not is not a client, and after a few of these it is
+// banned outright.
+func (f *Firewall) ReportProtocolFailure(remoteAddr string) {
+	f.mu.RLock()
+	c := f.aa.Strikes
+	on := f.enabled && f.aa.Enabled && c.Enabled && !f.inGrace(f.aa.GraceSeconds)
+	f.mu.RUnlock()
+	if !on {
+		return
+	}
+	f.strikes.add(clientKey(remoteAddr, "", nil), strikeProtocol, c)
+}
+
+// NoteConnectionClosed is called when a user connection finishes, with how long
+// it lasted and how many bytes crossed it. It feeds the two things that can
+// only be known afterwards: whether the source earned trust, and whether it is
+// scanning.
+//
+// One hook for both because they read the same evidence and disagree about it.
+// A connection that lasted and carried traffic is somebody using the tunnel; a
+// string of connections that carried nothing is somebody looking to see what is
+// listening.
+func (f *Firewall) NoteConnectionClosed(remoteAddr string, dur time.Duration, bytes int64) {
+	f.mu.RLock()
+	trust, strikes := f.aa.Trust, f.aa.Strikes
+	on := f.enabled && f.aa.Enabled && !f.inGrace(f.aa.GraceSeconds)
+	f.mu.RUnlock()
+	if !on {
+		return
+	}
+	key := clientKey(remoteAddr, "", nil)
+
+	if trust.Enabled && dur >= time.Duration(trust.AfterMs)*time.Millisecond && bytes >= int64(trust.MinBytes) {
+		f.trust.grant(key, trust)
+		return
+	}
+	if strikes.Enabled && bytes < int64(strikes.EmptyBytes) {
+		f.strikes.add(key, strikeEmpty, strikes)
+	}
+}
+
+// AcquireConn takes a concurrency slot for the source, reporting false when it
+// already holds as many connections as the profile allows. The returned release
+// must be called when the connection ends; it is a no-op when the cap is off.
+func (f *Firewall) AcquireConn(remoteAddr string) (ok bool, release func()) {
+	f.mu.RLock()
+	limit := f.aa.TCP.MaxConcurrent
+	on := f.enabled && f.aa.Enabled && f.aa.TCP.Enabled && limit > 0 && !f.inGrace(f.aa.GraceSeconds)
+	f.mu.RUnlock()
+	if !on {
+		return true, func() {}
+	}
+	key := clientKey(remoteAddr, "", nil)
+	if !f.conc.acquire(key, limit) {
+		return false, func() {}
+	}
+	return true, func() { f.conc.release(key) }
 }
 
 // AdmitTCP rate-limits one accepted user connection, after the rules and the
@@ -705,13 +848,27 @@ func (f *Firewall) applyAntiAttackerLocked(c AntiAttackerConfig) {
 // TIME_WAIT for two minutes is a poor answer to a flood.
 func (f *Firewall) AdmitTCP(remoteAddr, user, proxyName string) Verdict {
 	f.mu.RLock()
-	p := f.aa.TCP
-	on := f.enabled && f.aa.Enabled && p.Enabled && f.aa.appliesTo(user, proxyName)
+	c := f.aa
+	on := f.enabled && c.Enabled
 	f.mu.RUnlock()
 	if !on {
 		return verdictAllow
 	}
-	return f.tcpLimiter.admit(clientKey(remoteAddr, "", nil), p)
+	// Counted even when this proxy is out of scope and even during grace: the
+	// attack state is a reading of the whole server's load, and one taken only
+	// from the parts still being policed would be the wrong number.
+	f.attack.note(c.Attack)
+
+	if !c.TCP.Enabled || !c.appliesTo(user, proxyName) {
+		return verdictAllow
+	}
+	key := clientKey(remoteAddr, "", nil)
+	if skip, refuse := f.exempt(key, c); skip {
+		return verdictAllow
+	} else if refuse {
+		return verdictStruck
+	}
+	return f.tcpLimiter.admitBoth(key, c.TCP)
 }
 
 // AdmitHTTP rate-limits one request served by the vhost reverse proxy. xff is
@@ -723,14 +880,20 @@ func (f *Firewall) AdmitTCP(remoteAddr, user, proxyName string) Verdict {
 // request that landed on an already-open one.
 func (f *Firewall) AdmitHTTP(remoteAddr, xff, user, proxyName string) Verdict {
 	f.mu.RLock()
-	p := f.aa.HTTP.RateProfile
+	c := f.aa
 	trusted := f.aaTrusted
-	on := f.enabled && f.aa.Enabled && p.Enabled && f.aa.appliesTo(user, proxyName)
+	on := f.enabled && c.Enabled && c.HTTP.Enabled && c.appliesTo(user, proxyName)
 	f.mu.RUnlock()
 	if !on {
 		return verdictAllow
 	}
-	return f.httpLimiter.admit(clientKey(remoteAddr, xff, trusted), p)
+	key := clientKey(remoteAddr, xff, trusted)
+	if skip, refuse := f.exempt(key, c); skip {
+		return verdictAllow
+	} else if refuse {
+		return verdictStruck
+	}
+	return f.httpLimiter.admitBoth(key, c.HTTP.RateProfile)
 }
 
 // AdmitControl rate-limits one connection to the frps control port, after
@@ -744,13 +907,21 @@ func (f *Firewall) AdmitHTTP(remoteAddr, xff, user, proxyName string) Verdict {
 // down until it gets back in. The default limits are correspondingly loose.
 func (f *Firewall) AdmitControl(remoteAddr string) Verdict {
 	f.mu.RLock()
-	p := f.aa.Control.RateProfile
-	on := f.enabled && f.aa.Enabled && f.aa.Control.Protect && p.Enabled
+	c := f.aa
+	on := f.enabled && c.Enabled && c.Control.Protect
 	f.mu.RUnlock()
 	if !on {
 		return verdictAllow
 	}
-	return f.ctlLimiter.admit(clientKey(remoteAddr, "", nil), p)
+	f.attack.note(c.Attack)
+
+	key := clientKey(remoteAddr, "", nil)
+	if skip, refuse := f.exempt(key, c); skip {
+		return verdictAllow
+	} else if refuse {
+		return verdictStruck
+	}
+	return f.ctlLimiter.admitBoth(key, c.Control.RateProfile)
 }
 
 // AdmitWeb rate-limits one connection to the dashboard port, after AllowWeb has
@@ -761,26 +932,42 @@ func (f *Firewall) AdmitControl(remoteAddr string) Verdict {
 // very low can lock themselves out until frps_firewall.json is edited by hand.
 func (f *Firewall) AdmitWeb(remoteAddr string) Verdict {
 	f.mu.RLock()
-	p := f.aa.Web.RateProfile
-	on := f.enabled && f.aa.Enabled && f.aa.Web.Protect && p.Enabled
+	c := f.aa
+	on := f.enabled && c.Enabled && c.Web.Protect
 	f.mu.RUnlock()
 	if !on {
 		return verdictAllow
 	}
-	return f.webLimiter.admit(clientKey(remoteAddr, "", nil), p)
+	f.attack.note(c.Attack)
+
+	key := clientKey(remoteAddr, "", nil)
+	if skip, refuse := f.exempt(key, c); skip {
+		return verdictAllow
+	} else if refuse {
+		return verdictStruck
+	}
+	return f.webLimiter.admitBoth(key, c.Web.RateProfile)
 }
 
 // AdmitSSH rate-limits one connection to the ssh tunnel gateway port, after
 // AllowControl has allowed it. Armed by AntiAttacker.SSH.Protect.
 func (f *Firewall) AdmitSSH(remoteAddr string) Verdict {
 	f.mu.RLock()
-	p := f.aa.SSH.RateProfile
-	on := f.enabled && f.aa.Enabled && f.aa.SSH.Protect && p.Enabled
+	c := f.aa
+	on := f.enabled && c.Enabled && c.SSH.Protect
 	f.mu.RUnlock()
 	if !on {
 		return verdictAllow
 	}
-	return f.sshLimiter.admit(clientKey(remoteAddr, "", nil), p)
+	f.attack.note(c.Attack)
+
+	key := clientKey(remoteAddr, "", nil)
+	if skip, refuse := f.exempt(key, c); skip {
+		return verdictAllow
+	} else if refuse {
+		return verdictStruck
+	}
+	return f.sshLimiter.admitBoth(key, c.SSH.RateProfile)
 }
 
 // AdmitUDP rate-limits one UDP packet of size bytes, for the udp and pe proxies
@@ -798,6 +985,66 @@ func (f *Firewall) AdmitUDP(remoteAddr string, size int, user, proxyName string)
 		return true
 	}
 	return f.udpLimiter.admit(clientKey(remoteAddr, "", nil), size, p)
+}
+
+// AntiAttackerStatus reports what the rate limiting is doing right now, as
+// opposed to what it is configured to do.
+//
+// This exists because everything above is deliberately quiet: a rate-limit
+// refusal writes no log line, since a flood being turned away must not become a
+// flood of writes. That leaves no way to tell a working configuration from one
+// that is off, and no way to find out who is being turned away - which is what
+// somebody looking at this page actually wants to know.
+func (f *Firewall) AntiAttackerStatus() Status {
+	f.mu.RLock()
+	c := f.aa
+	on := f.enabled && c.Enabled
+	f.mu.RUnlock()
+
+	st := Status{Tracked: map[string]int{}}
+	if !on {
+		st.Bans = []BanEntry{}
+		return st
+	}
+	now := f.nowMsFn()
+	st.UnderAttack = c.Attack.Enabled && f.attack.isUnder()
+	st.InGrace = f.inGrace(c.GraceSeconds)
+	st.Trusted = f.trust.size()
+	st.OpenConns = f.conc.size()
+	st.Tracked = map[string]int{
+		"tcp":     f.tcpLimiter.size(),
+		"http":    f.httpLimiter.size(),
+		"udp":     f.udpLimiter.size(),
+		"control": f.ctlLimiter.size(),
+		"web":     f.webLimiter.size(),
+		"ssh":     f.sshLimiter.size(),
+		"strikes": f.strikes.size(),
+	}
+
+	bans := make([]BanEntry, 0, 16)
+	bans = append(bans, f.tcpLimiter.bans("tcp", now)...)
+	bans = append(bans, f.httpLimiter.bans("http", now)...)
+	bans = append(bans, f.ctlLimiter.bans("control", now)...)
+	bans = append(bans, f.webLimiter.bans("web", now)...)
+	bans = append(bans, f.sshLimiter.bans("ssh", now)...)
+	bans = append(bans, f.strikes.bans(now)...)
+	sort.Slice(bans, func(i, j int) bool { return bans[i].SecondsLeft > bans[j].SecondsLeft })
+	st.Bans = bans
+	return st
+}
+
+// ClearAntiAttackerBans lifts every ban and forgets every strike, for the
+// operator who has just fixed whatever was tripping it and does not want to
+// wait the ban out. Trust is kept: it was earned, and nothing here revokes it.
+func (f *Firewall) ClearAntiAttackerBans() {
+	f.tcpLimiter.reset()
+	f.httpLimiter.reset()
+	f.udpLimiter.reset()
+	f.ctlLimiter.reset()
+	f.webLimiter.reset()
+	f.sshLimiter.reset()
+	f.strikes.reset()
+	f.conc.reset()
 }
 
 // RetryAfterSeconds is what an HTTP 429 should advertise for this verdict: the

@@ -77,6 +77,10 @@ func (svr *Service) registerRouteHandlers(helper *httppkg.RouterRegisterHelper) 
 
 	subRouter.HandleFunc("/api/firewall", svr.apiFirewallPut).Methods("PUT")
 
+	subRouter.HandleFunc("/api/firewall/status", svr.apiFirewallStatusGet).Methods("GET")
+
+	subRouter.HandleFunc("/api/firewall/bans", svr.apiFirewallBansDelete).Methods("DELETE")
+
 	subRouter.HandleFunc("/api/v2/users", httppkg.MakeHTTPHandlerFuncV2(apiController.APIV2UserList)).Methods("GET")
 
 	subRouter.HandleFunc("/api/v2/system/info", httppkg.MakeHTTPHandlerFuncV2(apiController.APIV2SystemInfo)).Methods("GET")

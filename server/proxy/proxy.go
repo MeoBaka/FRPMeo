@@ -742,6 +742,22 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 				return
 
 			}
+
+			// Held for as long as the connection is, which is the point: the
+			// rate tiers count connections being made, and a peer that opens a
+			// thousand and then goes quiet breaks no rate at all.
+
+			ok, release := fw.AcquireConn(remoteAddr)
+			if !ok {
+
+				netpkg.ArmReset(userConn)
+
+				return
+
+			}
+
+			defer release()
+
 		}
 	}
 
@@ -841,6 +857,8 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 	closed := pxy.openUserConn(content.RemoteAddr)
 
+	started := time.Now()
+
 	inCount, outCount, _ := pxy.joinUserConnection(local, userConn, proxyType, xl)
 
 	closed()
@@ -848,6 +866,22 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 	metrics.Server.AddTrafficIn(name, proxyType, inCount)
 
 	metrics.Server.AddTrafficOut(name, proxyType, outCount)
+
+	// What the connection turned out to be can only be known now that it is
+
+	// over, and the same two numbers answer both questions the firewall has:
+
+	// one that lasted and carried traffic earns its source an exemption, while
+
+	// a string of them that carried nothing is somebody seeing what is
+
+	// listening. Visitor-authenticated proxies are left out for the same reason
+
+	// they skip the rate limit - their callers already proved a secret.
+
+	if fw := rc.Firewall; fw != nil && !pxy.visitorAuthenticated {
+		fw.NoteConnectionClosed(remoteAddr, time.Since(started), inCount+outCount)
+	}
 
 	xl.Debugf("join connections closed")
 }
