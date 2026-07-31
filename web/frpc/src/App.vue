@@ -61,12 +61,20 @@
             Visitors
           </router-link>
           <router-link
+            to="/settings"
+            class="sidebar-link"
+            :class="{ active: route.path === '/settings' }"
+            @click="closeSidebar"
+          >
+            Settings
+          </router-link>
+          <router-link
             to="/config"
             class="sidebar-link"
             :class="{ active: route.path === '/config' }"
             @click="closeSidebar"
           >
-            Config
+            Config (raw)
           </router-link>
         </nav>
       </aside>

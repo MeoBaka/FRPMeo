@@ -528,3 +528,53 @@ func (c *Controller) DeleteStoreVisitor(ctx *httppkg.Context) (any, error) {
 
 	return nil, nil
 }
+
+// GetCommonConfig handles GET /api/common - the client-level settings from the
+// config file, as fields rather than as text.
+func (c *Controller) GetCommonConfig(_ *httppkg.Context) (any, error) {
+	content, err := c.manager.ReadConfigFile()
+	if err != nil {
+		return nil, c.toHTTPError(err)
+	}
+
+	common, err := configmgmt.ReadCommonConfig(content)
+	if err != nil {
+		return nil, c.toHTTPError(err)
+	}
+
+	return configmgmt.CommonConfigJSON{Common: common}, nil
+}
+
+// PutCommonConfig handles PUT /api/common.
+//
+// Writes the client-level keys back into the file and leaves everything else -
+// the proxies, the visitors, any key a newer frp would understand - as it was.
+// The file is parsed before being written, because a config that will not load
+// is a client that will not come back.
+func (c *Controller) PutCommonConfig(ctx *httppkg.Context) (any, error) {
+	body, err := ctx.Body()
+	if err != nil {
+		return nil, httppkg.NewError(http.StatusBadRequest, fmt.Sprintf("read request body error: %v", err))
+	}
+
+	common, err := configmgmt.DecodeCommonConfig(body)
+	if err != nil {
+		return nil, c.toHTTPError(err)
+	}
+
+	content, err := c.manager.ReadConfigFile()
+	if err != nil {
+		return nil, c.toHTTPError(err)
+	}
+
+	merged, err := configmgmt.MergeCommonConfig(content, common)
+	if err != nil {
+		return nil, c.toHTTPError(err)
+	}
+
+	if err := c.manager.WriteConfigFile([]byte(merged)); err != nil {
+		return nil, c.toHTTPError(err)
+	}
+
+	return nil, nil
+}
