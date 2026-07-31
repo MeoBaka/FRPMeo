@@ -709,6 +709,80 @@ func TestAntiAttackerSurvivesReload(t *testing.T) {
 	}
 }
 
+// --- control port ---
+
+func TestAdmitControlOffByDefault(t *testing.T) {
+	f := newTestFirewall(t, nil)
+	for range 500 {
+		if !f.AdmitControl("1.2.3.4:1000").Allowed {
+			t.Fatal("the control port was rate limited while AntiAttacker was off")
+		}
+	}
+}
+
+// Turning AntiAttacker on for proxies must not start refusing frpc clients:
+// that would take every tunnel down, which is worse than the flood.
+func TestAdmitControlNeedsItsOwnSwitch(t *testing.T) {
+	f := newAAFirewall(t, AntiAttackerConfig{
+		Enabled: true,
+		TCP:     RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 1},
+		Control: ControlProfile{RateProfile: RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 1}},
+		// Protect left false
+	})
+	for range 10 {
+		if !f.AdmitControl("1.2.3.4:1000").Allowed {
+			t.Fatal("the control port was limited without Control.Protect")
+		}
+	}
+}
+
+func TestAdmitControlLimits(t *testing.T) {
+	f := newAAFirewall(t, AntiAttackerConfig{
+		Enabled: true,
+		Control: ControlProfile{
+			Protect:     true,
+			RateProfile: RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 3, BanViolations: 99},
+		},
+	})
+	for i := range 3 {
+		if !f.AdmitControl("1.2.3.4:1000").Allowed {
+			t.Fatalf("connection %d refused, want allowed", i+1)
+		}
+	}
+	if f.AdmitControl("1.2.3.4:1000").Allowed {
+		t.Fatal("4th connection allowed past a limit of 3")
+	}
+}
+
+// One frpc address is a control connection, a pool of work connections and
+// possibly user traffic to a proxy. Sharing one counter would let any of those
+// starve the others.
+func TestControlAndProxyCountersAreSeparate(t *testing.T) {
+	f := newAAFirewall(t, AntiAttackerConfig{
+		Enabled: true,
+		TCP:     RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 1, BanViolations: 99},
+		Control: ControlProfile{
+			Protect:     true,
+			RateProfile: RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 1, BanViolations: 99},
+		},
+	})
+	f.AdmitTCP("1.2.3.4:1000", "", "web")
+	if f.AdmitTCP("1.2.3.4:1000", "", "web").Allowed {
+		t.Fatal("the proxy limit did not apply")
+	}
+	if !f.AdmitControl("1.2.3.4:1000").Allowed {
+		t.Fatal("proxy traffic used up the control port's budget for the same address")
+	}
+}
+
+func TestControlProfileDefaultIsLooserThanTCP(t *testing.T) {
+	c := AntiAttackerConfig{}.normalize()
+	if c.Control.MaxPerWindow <= c.TCP.MaxPerWindow {
+		t.Fatalf("control default %d is not above the tcp default %d - an frpc pool would trip it",
+			c.Control.MaxPerWindow, c.TCP.MaxPerWindow)
+	}
+}
+
 func TestValidateAntiAttacker(t *testing.T) {
 	ok := AntiAttackerConfig{HTTP: HTTPProfile{TrustedProxies: []string{"10.0.0.0/8", "1.2.3.4", "::1", ""}}}
 	if err := ValidateAntiAttacker(ok); err != nil {

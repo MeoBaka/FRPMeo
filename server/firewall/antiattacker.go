@@ -65,6 +65,28 @@ type AntiAttackerConfig struct {
 	// UDP covers the udp and pe (Minecraft Bedrock) proxies and the udp half of
 	// tcp+udp. Shaped differently from the other two, for reasons in UDPProfile.
 	UDP UDPProfile `json:"udp"`
+
+	// Control rate-limits the frps control port, and has its own profile rather
+	// than sharing TCP's for a reason worth knowing before turning it on: an
+	// frpc client's *work* connections arrive on that same port, so what looks
+	// like one client is poolCount connections at startup and more as the pool
+	// is replenished. Limits sized for logins would throttle a healthy client.
+	//
+	// Its own switch as well, matching how the rules half of this firewall
+	// treats the control port: locking out the clients that keep the tunnels up
+	// is a bigger mistake than letting one flood through, so nobody gets it
+	// without asking.
+	Control ControlProfile `json:"control"`
+}
+
+// ControlProfile is the TCP shape again, plus the switch that arms it.
+type ControlProfile struct {
+	RateProfile
+
+	// Enabled on RateProfile turns the counting on; this says the control port
+	// is in scope at all. Both are needed, so enabling AntiAttacker for proxies
+	// never quietly starts refusing frpc clients.
+	Protect bool `json:"protect"`
 }
 
 // UDPProfile rate-limits UDP by packets and bytes, and deliberately cannot ban.
@@ -186,6 +208,26 @@ func defaultHTTPProfile() HTTPProfile {
 	}
 }
 
+// defaultControlProfile is far more permissive than the TCP one, and not from
+// XCord - nothing there has an equivalent. The number has to cover an frpc
+// client's pool: one login plus poolCount work connections at startup, then a
+// replenishment for every connection a visitor consumes. 200 per 5 s leaves
+// room for a busy client while still being orders of magnitude below a flood.
+//
+// Read the ban as what it is: a client that trips this stops reconnecting for a
+// minute, and its tunnels are down for that minute. Raise it rather than trim
+// it if there is any doubt.
+func defaultControlProfile() RateProfile {
+	return RateProfile{
+		WindowMs:      5000,
+		MaxPerWindow:  200,
+		BanViolations: 3,
+		BanSeconds:    60,
+		IdleForgetMs:  40000,
+		MaxTracked:    65536,
+	}
+}
+
 // defaultUDPProfile takes its per-source rates from XCord's during-login
 // anti-ddos settings (500 packets/s, 50000 bytes/s), which is the closest thing
 // to a figure tested against real traffic. The global caps stay at zero: see
@@ -257,6 +299,7 @@ func (c AntiAttackerConfig) normalize() AntiAttackerConfig {
 	c.TCP = c.TCP.normalize(defaultTCPProfile())
 	c.HTTP.RateProfile = c.HTTP.normalize(defaultHTTPProfile().RateProfile)
 	c.UDP = c.UDP.normalize(defaultUDPProfile())
+	c.Control.RateProfile = c.Control.normalize(defaultControlProfile())
 	proxies := make([]string, 0, len(c.Proxies))
 	for _, p := range c.Proxies {
 		if p = strings.TrimSpace(p); p != "" {

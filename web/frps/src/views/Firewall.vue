@@ -211,11 +211,12 @@
         <div class="bar">
           <el-switch v-model="snap.antiAttacker.tcp.enabled" @change="save" />
           <span class="hint">
-            tcp, mc, tcpmux, https, the tcp half of tcp+udp, and the control
-            port. Refused connections are closed with RST, leaving no TIME_WAIT
-            socket behind. stcp / sudp / xtcp+xudp are exempt: their callers
-            proved a shared secret to get this far, so a limit could only
-            throttle a tunnel that is entitled to the traffic.
+            tcp, mc, tcpmux, https and the tcp half of tcp+udp. Refused
+            connections are closed with RST, leaving no TIME_WAIT socket
+            behind. Not the frps control port: rules still guard that, but it
+            is not rate limited. stcp / sudp / xtcp+xudp are exempt too - their
+            callers proved a shared secret to get this far, so a limit could
+            only throttle a tunnel that is entitled to the traffic.
           </span>
         </div>
         <div class="bar" style="margin-top:8px" v-if="snap.antiAttacker.tcp.enabled">
@@ -274,6 +275,30 @@
             Behind a CDN, leaving it blank means every visitor counts as one
             source - raise the limit accordingly.
           </span>
+        </div>
+
+        <el-divider content-position="left">Control port - counted per connection</el-divider>
+        <div class="bar">
+          <el-switch v-model="snap.antiAttacker.control.protect" @change="save" />
+          <span class="hint">
+            The frps control port (bindPort). Its own switch, and its own much
+            looser limits, because an frpc client's work connections arrive on
+            this port too: one healthy client is a login plus poolCount
+            connections at startup and more as the pool refills. Refusing one
+            keeps its tunnels down until it gets back in, so raise these rather
+            than trim them.
+          </span>
+        </div>
+        <div class="bar" style="margin-top:8px" v-if="snap.antiAttacker.control.protect">
+          <label class="lbl">Window (ms)</label>
+          <el-input v-model.number="snap.antiAttacker.control.windowMs" type="number" class="w120" />
+          <label class="lbl">Max / window</label>
+          <el-input v-model.number="snap.antiAttacker.control.maxPerWindow" type="number" class="w90" />
+          <label class="lbl">Ban after</label>
+          <el-input v-model.number="snap.antiAttacker.control.banViolations" type="number" class="w90" />
+          <label class="lbl">Ban (s)</label>
+          <el-input v-model.number="snap.antiAttacker.control.banSeconds" type="number" class="w90" />
+          <el-button @click="save" :loading="saving">Save</el-button>
         </div>
 
         <el-divider content-position="left">UDP - counted per packet</el-divider>
@@ -373,9 +398,12 @@ interface UDPProfile {
   globalMaxPacketsPerWindow: number; globalMaxBytesPerWindow: number
   idleForgetMs: number; maxTracked: number
 }
+// Control carries its own Protect switch: enabling AntiAttacker for proxies
+// must never start refusing the frpc clients that keep the tunnels up.
+interface ControlProfile extends RateProfile { protect: boolean }
 interface AntiAttacker {
   enabled: boolean; scope: string; proxies: string[]
-  tcp: RateProfile; http: HTTPProfile; udp: UDPProfile
+  tcp: RateProfile; http: HTTPProfile; udp: UDPProfile; control: ControlProfile
 }
 interface Snap {
   enabled: boolean; controlPort: boolean; webPort: boolean; default: string
@@ -400,6 +428,8 @@ function defAntiAttacker(): AntiAttacker {
     // Per-source rates from XCord's during-login anti-ddos settings. The global
     // ceilings stay at zero: no default can guess a host's capacity.
     udp: { enabled: true, windowMs: 1000, maxPacketsPerWindow: 500, maxBytesPerWindow: 50000, globalMaxPacketsPerWindow: 0, globalMaxBytesPerWindow: 0, idleForgetMs: 30000, maxTracked: 65536 },
+    // Far looser than tcp: a frpc pool is many connections from one address.
+    control: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 200, banViolations: 3, banSeconds: 60, idleForgetMs: 40000, maxTracked: 65536 },
   }
 }
 
@@ -480,6 +510,7 @@ async function load() {
       tcp: { ...aaDef.tcp, ...(aa.tcp || {}) },
       http: { ...aaDef.http, ...(aa.http || {}), trustedProxies: aa.http?.trustedProxies || [] },
       udp: { ...aaDef.udp, ...(aa.udp || {}) },
+      control: { ...aaDef.control, ...(aa.control || {}) },
     }
   } catch (e: any) {
     ElMessage.error('Load failed: ' + (e.message || e))

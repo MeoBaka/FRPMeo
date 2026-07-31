@@ -326,6 +326,11 @@ type Firewall struct {
 	tcpLimiter  *limiter
 	httpLimiter *limiter
 	udpLimiter  *udpLimiter
+	// ctlLimiter is kept apart from tcpLimiter on purpose. One frpc client is
+	// both a control connection and a stream of work connections from the same
+	// address, and it may also be reaching proxies from there; sharing a
+	// counter would let one of those starve the other.
+	ctlLimiter *limiter
 }
 
 // New loads firewall state from path and starts a background expiry sweeper.
@@ -340,6 +345,7 @@ func New(path string) (*Firewall, error) {
 		tcpLimiter:  newLimiter(nil),
 		httpLimiter: newLimiter(nil),
 		udpLimiter:  newUDPLimiter(nil),
+		ctlLimiter:  newLimiter(nil),
 	}
 	b, err := os.ReadFile(path)
 	switch {
@@ -678,6 +684,7 @@ func (f *Firewall) applyAntiAttackerLocked(c AntiAttackerConfig) {
 	f.tcpLimiter.reset()
 	f.httpLimiter.reset()
 	f.udpLimiter.reset()
+	f.ctlLimiter.reset()
 }
 
 // AdmitTCP rate-limits one accepted user connection, after the rules and the
@@ -715,6 +722,26 @@ func (f *Firewall) AdmitHTTP(remoteAddr, xff, user, proxyName string) Verdict {
 		return verdictAllow
 	}
 	return f.httpLimiter.admit(clientKey(remoteAddr, xff, trusted), p)
+}
+
+// AdmitControl rate-limits one connection to the frps control port, after
+// AllowControl has allowed it.
+//
+// The control port carries no proxy, so the Scope setting does not apply here -
+// it is armed by its own AntiAttacker.Control.Protect switch instead.
+//
+// Note what a refusal means here, which is not what it means for a user
+// connection: the peer is an frpc client, and turning it away keeps its tunnels
+// down until it gets back in. The default limits are correspondingly loose.
+func (f *Firewall) AdmitControl(remoteAddr string) Verdict {
+	f.mu.RLock()
+	p := f.aa.Control.RateProfile
+	on := f.enabled && f.aa.Enabled && f.aa.Control.Protect && p.Enabled
+	f.mu.RUnlock()
+	if !on {
+		return verdictAllow
+	}
+	return f.ctlLimiter.admit(clientKey(remoteAddr, "", nil), p)
 }
 
 // AdmitUDP rate-limits one UDP packet of size bytes, for the udp and pe proxies

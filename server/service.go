@@ -1047,6 +1047,20 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 				continue
 
 			}
+
+			// Rate limit after the rules, matching the order on the proxy
+			// paths. Silent, because a flood that is being refused must not
+			// also become a flood of log lines.
+
+			if v := svr.rc.Firewall.AdmitControl(c.RemoteAddr().String()); !v.Allowed {
+
+				netpkg.ArmReset(c)
+
+				c.Close()
+
+				continue
+
+			}
 		}
 
 		// inject xlog object into net.Conn context
@@ -1153,6 +1167,17 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String(), localPort(c.LocalAddr())); !ok {
 
 				log.Warnf("[FW] reject quic control %s reason: %s", c.RemoteAddr(), reason)
+
+				_ = c.CloseWithError(0, "")
+
+				continue
+
+			}
+
+			// Same order as the tcp listener: rules, then the rate limit. No
+			// RST to arm here - quic closes without leaving TIME_WAIT behind.
+
+			if v := svr.rc.Firewall.AdmitControl(c.RemoteAddr().String()); !v.Allowed {
 
 				_ = c.CloseWithError(0, "")
 

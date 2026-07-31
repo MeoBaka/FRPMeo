@@ -687,26 +687,57 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 	rc := pxy.GetResourceController()
 
-	// Rate limiting comes before anything else this function does, including
-	// building the plugin content below: under a flood the whole value of the
-	// check is that refusing costs less than accepting, and work done ahead of
-	// it is work the attacker gets for free.
-	//
-	// Skipped for the visitor-authenticated types, which proved a shared secret
-	// to get here - see BaseProxy.visitorAuthenticated.
-	//
-	// The refusal closes with RST rather than a graceful FIN so the socket
-	// leaves nothing in TIME_WAIT - the deferred Close above does the closing,
-	// this only changes how. It is also silent: logging a line per rejection
-	// turns a flood into a second flood against the disk.
+	remoteAddr := userConn.RemoteAddr().String()
 
-	if fw := rc.Firewall; fw != nil && !pxy.visitorAuthenticated {
-		if v := fw.AdmitTCP(userConn.RemoteAddr().String(), pxy.GetUserInfo().User, pxy.GetName()); !v.Allowed {
+	// The frps-side port the user dialed: what a firewall rule matches on, and
+
+	// what tells us a connection is frps reaching its own machinery.
+
+	dstPort := addrPort(userConn.LocalAddr())
+
+	// Admission runs in the same order here as on the http and udp paths -
+	// rules, then the rate limit - and both come before the plugin content is
+	// built below, so a refusal costs no allocation.
+	//
+	// Rules first because they are about identity and are the cheaper question:
+	// a source already on a deny list should not get as far as occupying a slot
+	// in the rate limiter's table, which under a flood is the table an attacker
+	// would otherwise be filling for free.
+	//
+	// Every refusal here closes with RST rather than a graceful FIN, so nothing
+	// is left in TIME_WAIT - the deferred Close above does the closing, this
+	// only changes how.
+
+	if fw := rc.Firewall; fw != nil {
+
+		// The run id and the proxy name are already prefixed by the logger, so
+		// the message carries neither - a rejection is common enough that
+		// repeating them costs more than it tells.
+
+		if ok, reason := fw.Allow(remoteAddr, dstPort); !ok {
+
+			xl.Warnf("[FW] reject %s reason: %s", remoteAddr, reason)
 
 			netpkg.ArmReset(userConn)
 
 			return
 
+		}
+
+		// Rate limiting is skipped for the visitor-authenticated types, which
+		// proved a shared secret to get here - see
+		// BaseProxy.visitorAuthenticated. Unlike the rule above it is silent:
+		// logging a line per rejection turns a flood into a second flood
+		// against the disk.
+
+		if !pxy.visitorAuthenticated {
+			if v := fw.AdmitTCP(remoteAddr, pxy.GetUserInfo().User, pxy.GetName()); !v.Allowed {
+
+				netpkg.ArmReset(userConn)
+
+				return
+
+			}
 		}
 	}
 
@@ -721,35 +752,7 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 		ProxyType: cfg.Type,
 
-		RemoteAddr: userConn.RemoteAddr().String(),
-	}
-
-	// The frps-side port the user dialed: what a firewall rule matches on, and
-
-	// what tells us a connection is frps reaching its own machinery.
-
-	dstPort := addrPort(userConn.LocalAddr())
-
-	// Native firewall: reject the user connection before it reaches the tunnel.
-
-	//
-
-	// The run id and the proxy name are already prefixed by the logger, so the
-
-	// message carries neither - a rejection is common enough that repeating
-
-	// them costs more than it tells.
-
-	if fw := rc.Firewall; fw != nil {
-		if ok, reason := fw.Allow(content.RemoteAddr, dstPort); !ok {
-
-			xl.Warnf("[FW] reject %s reason: %s", content.RemoteAddr, reason)
-
-			netpkg.ArmReset(userConn)
-
-			return
-
-		}
+		RemoteAddr: remoteAddr,
 	}
 
 	// Server plugin hook, unless this is frps dialing a plugin published
@@ -762,6 +765,8 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 		if _, err := rc.PluginManager.NewUserConn(content); err != nil {
 
 			xl.Warnf("the user conn [%s] was rejected, err:%v", content.RemoteAddr, err)
+
+			netpkg.ArmReset(userConn)
 
 			return
 
