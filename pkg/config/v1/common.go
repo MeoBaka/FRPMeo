@@ -102,6 +102,48 @@ type WebServerConfig struct {
 	// Enable TLS if TLSConfig is not nil.
 
 	TLS *TLSConfig `json:"tls,omitempty"`
+
+	// AllowCIDRs lists the peers allowed to reach this port, as addresses or
+
+	// CIDRs. Empty - the default - means everybody, which is safe only while
+
+	// Addr stays on loopback.
+
+	//
+
+	// Worth reaching for first whenever the port is exposed at all. A
+
+	// management interface has a handful of legitimate clients and everybody
+
+	// else is wrong, so naming them removes the attack rather than narrowing
+
+	// it: a peer not on the list never reaches the handshake, let alone the
+
+	// login form.
+
+	AllowCIDRs []string `json:"allowCIDRs,omitempty"`
+
+	// MaxLoginFailures bans a source after this many rejected logins. Zero -
+
+	// the default - leaves the ban off.
+
+	//
+
+	// A low number is right here, unlike most thresholds. Nobody who belongs
+
+	// gets the password wrong repeatedly; they have it saved or they look it
+
+	// up. Two or three is the whole distribution, not impatience.
+
+	MaxLoginFailures int `json:"maxLoginFailures,omitempty"`
+
+	// LoginBanSeconds is how long such a ban lasts (default 600). It is never
+
+	// extended by further attempts, so an administrator who mistypes on a timer
+
+	// still gets back in.
+
+	LoginBanSeconds int `json:"loginBanSeconds,omitempty"`
 }
 
 func (c *WebServerConfig) Complete() {

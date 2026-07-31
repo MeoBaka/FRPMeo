@@ -39,6 +39,7 @@ import (
 
 	"github.com/fatedier/frp/assets"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/util/guard"
 	"github.com/fatedier/frp/pkg/util/log"
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
@@ -71,6 +72,16 @@ type Server struct {
 	// auth is kept so the failure hook can be attached after construction.
 
 	auth *netpkg.HTTPAuthMiddleware
+
+	// guard is the allow list and the failed-login ban, nil when the config
+
+	// asked for neither. It runs ahead of connFilter: being on the list is a
+
+	// question about who the peer is, and there is no point asking anything
+
+	// else of somebody who is not.
+
+	guard *guard.Guard
 }
 
 func NewServer(cfg v1.WebServerConfig) (*Server, error) {
@@ -140,7 +151,30 @@ func NewServer(cfg v1.WebServerConfig) (*Server, error) {
 
 	}
 
+	s.guard, err = guard.New(guard.Config{
+		AllowCIDRs: cfg.AllowCIDRs,
+
+		MaxLoginFailures: cfg.MaxLoginFailures,
+
+		BanSeconds: cfg.LoginBanSeconds,
+	})
+	if err != nil {
+
+		_ = ln.Close()
+
+		return nil, err
+
+	}
+
 	s.auth = netpkg.NewHTTPAuthMiddleware(cfg.User, cfg.Password).SetAuthFailDelay(200 * time.Millisecond)
+
+	// The guard counts failures itself. Anyone calling SetOnAuthFail is added
+
+	// alongside rather than in place of it, so wiring an observer cannot
+
+	// silently disarm the ban.
+
+	s.auth.SetOnAuthFail(s.guard.ReportLoginFailure)
 
 	s.authMiddleware = s.auth.Middleware
 
@@ -164,9 +198,16 @@ func NewServer(cfg v1.WebServerConfig) (*Server, error) {
 // Must be called before Run.
 
 func (s *Server) SetOnAuthFail(fn func(remoteAddr string)) {
-	if s.auth != nil {
-		s.auth.SetOnAuthFail(fn)
+	if s.auth == nil || fn == nil {
+		return
 	}
+	g := s.guard
+
+	s.auth.SetOnAuthFail(func(remoteAddr string) {
+		g.ReportLoginFailure(remoteAddr)
+
+		fn(remoteAddr)
+	})
 }
 
 func (s *Server) Address() string {
@@ -202,8 +243,8 @@ func (s *Server) Run() error {
 
 	// have been handed to a handshake first.
 
-	if s.connFilter != nil {
-		ln = &filteredListener{Listener: ln, allow: s.connFilter}
+	if s.guard != nil || s.connFilter != nil {
+		ln = &filteredListener{Listener: ln, guard: s.guard, allow: s.connFilter}
 	}
 
 	if s.tlsCfg != nil {
@@ -220,6 +261,8 @@ func (s *Server) Run() error {
 type filteredListener struct {
 	net.Listener
 
+	guard *guard.Guard
+
 	allow func(remoteAddr string) bool
 }
 
@@ -231,7 +274,9 @@ func (l *filteredListener) Accept() (net.Conn, error) {
 			return nil, err
 		}
 
-		if l.allow(c.RemoteAddr().String()) {
+		addr := c.RemoteAddr().String()
+
+		if l.guard.Allow(addr) && (l.allow == nil || l.allow(addr)) {
 			return c, nil
 		}
 
