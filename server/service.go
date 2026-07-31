@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/fatedier/golib/crypto"
@@ -1044,8 +1045,26 @@ func localPort(addr net.Addr) int {
 
 // TODO(fatedier): Pass some parameters of listener/connection through context to avoid passing too many parameters.
 
+// maxPendingHandshakes bounds how many connections may be in the middle of
+// being admitted at once - the firewall check and the TLS sniff.
+//
+// Both of those can block: the reputation provider is an http round trip, and
+// the TLS sniff is a read that waits for the peer to say something. Running
+// them one after another in the accept loop, which is what used to happen,
+// meant a single silent peer held up every other client for the whole read
+// timeout. Handling them concurrently fixes that; a bound is what stops the fix
+// from being its own problem, because a flood would otherwise become one
+// goroutine per connection.
+//
+// At the limit new connections are refused outright. Turning somebody away
+// quickly is a better answer than queueing them behind work that is already not
+// keeping up.
+const maxPendingHandshakes = 2048
+
 func (svr *Service) HandleListener(l net.Listener, internal bool) {
 	// Listen for incoming connections from client.
+
+	pending := make(chan struct{}, maxPendingHandshakes)
 
 	for {
 
@@ -1058,146 +1077,188 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 
 		}
 
-		// Native firewall: drop blocked clients before the TLS handshake.
+		select {
 
-		// Skipped for internal listeners (ssh tunnel gateway), which are not
+		case pending <- struct{}{}:
 
-		// real remote peers.
+		default:
 
-		if !internal && svr.rc.Firewall != nil {
-			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String(), localPort(c.LocalAddr())); !ok {
+			// Every admission slot is busy. Refuse rather than wait: the accept
+			// loop staying responsive is the whole point of the bound.
 
-				log.Warnf("[FW] reject control %s reason: %s", c.RemoteAddr(), reason)
+			netpkg.ArmReset(c)
 
-				// RST rather than a graceful close: a rejected peer has no use
-				// for an orderly shutdown, and TIME_WAIT sockets piling up on
-				// the side doing the rejecting is what a flood is counting on.
+			c.Close()
 
-				netpkg.ArmReset(c)
+			continue
 
-				c.Close()
-
-				continue
-
-			}
-
-			// Rate limit after the rules, matching the order on the proxy
-			// paths. Silent, because a flood that is being refused must not
-			// also become a flood of log lines.
-
-			if v := svr.rc.Firewall.AdmitControl(c.RemoteAddr().String()); !v.Allowed {
-
-				netpkg.ArmReset(c)
-
-				c.Close()
-
-				continue
-
-			}
 		}
 
-		// inject xlog object into net.Conn context
+		go func(c net.Conn) {
+			// Released once admission is over, not when serving is: a tunnel
+			// stays up for hours and must not hold a slot meant for the few
+			// hundred milliseconds of deciding whether to let it in. OnceFunc
+			// so the deferred safety net cannot free a slot twice when the
+			// explicit release has already run.
 
-		xl := xlog.New()
+			release := sync.OnceFunc(func() { <-pending })
 
-		ctx := context.Background()
+			defer release()
 
-		c = netpkg.NewContextConn(xlog.NewContext(ctx, xl), c)
+			svr.admitAndServe(c, internal, release)
+		}(c)
 
-		if !internal {
+	}
+}
 
-			log.Tracef("start check TLS connection...")
+// admitAndServe runs the checks that may block, then hands the connection on.
+// Called on its own goroutine - see maxPendingHandshakes for why.
+func (svr *Service) admitAndServe(c net.Conn, internal bool, release func()) {
+	// Native firewall: drop blocked clients before the TLS handshake.
 
-			originConn := c
+	// Skipped for internal listeners (ssh tunnel gateway), which are not
 
-			forceTLS := svr.cfg.Transport.TLS.Force
+	// real remote peers.
 
-			var isTLS, custom bool
+	if !internal && svr.rc.Firewall != nil {
+		if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String(), localPort(c.LocalAddr())); !ok {
 
-			// Shortened while under attack: a peer that opens a connection and
-			// says nothing holds a socket for the whole timeout, and that is
-			// what a slow flood is made of.
+			log.Warnf("[FW] reject control %s reason: %s", c.RemoteAddr(), reason)
 
-			timeout := connReadTimeout
+			// RST rather than a graceful close: a rejected peer has no use
+			// for an orderly shutdown, and TIME_WAIT sockets piling up on
+			// the side doing the rejecting is what a flood is counting on.
+
+			netpkg.ArmReset(c)
+
+			c.Close()
+
+			return
+
+		}
+
+		// Rate limit after the rules, matching the order on the proxy
+		// paths. Silent, because a flood that is being refused must not
+		// also become a flood of log lines.
+
+		if v := svr.rc.Firewall.AdmitControl(c.RemoteAddr().String()); !v.Allowed {
+
+			netpkg.ArmReset(c)
+
+			c.Close()
+
+			return
+
+		}
+	}
+
+	// inject xlog object into net.Conn context
+
+	xl := xlog.New()
+
+	ctx := context.Background()
+
+	c = netpkg.NewContextConn(xlog.NewContext(ctx, xl), c)
+
+	if !internal {
+
+		log.Tracef("start check TLS connection...")
+
+		originConn := c
+
+		forceTLS := svr.cfg.Transport.TLS.Force
+
+		var (
+			isTLS, custom bool
+
+			err error
+		)
+
+		// Shortened while under attack: a peer that opens a connection and
+		// says nothing holds a socket for the whole timeout, and that is
+		// what a slow flood is made of.
+
+		timeout := connReadTimeout
+
+		if svr.rc.Firewall != nil {
+			timeout = svr.rc.Firewall.HandshakeTimeout(timeout)
+		}
+
+		c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, timeout)
+		if err != nil {
+
+			log.Warnf("client conn [%s] failed the TLS check: %v", originConn.RemoteAddr(), err)
+
+			// Not an frpc having a bad day: something that does not speak
+			// the protocol at all. Worth more than any amount of counting,
+			// so it goes straight to the strike ledger.
 
 			if svr.rc.Firewall != nil {
-				timeout = svr.rc.Firewall.HandshakeTimeout(timeout)
+				svr.rc.Firewall.ReportProtocolFailure(originConn.RemoteAddr().String())
 			}
 
-			c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, timeout)
-			if err != nil {
+			netpkg.ArmReset(originConn)
 
-				log.Warnf("client conn [%s] failed the TLS check: %v", originConn.RemoteAddr(), err)
+			originConn.Close()
 
-				// Not an frpc having a bad day: something that does not speak
-				// the protocol at all. Worth more than any amount of counting,
-				// so it goes straight to the strike ledger.
-
-				if svr.rc.Firewall != nil {
-					svr.rc.Firewall.ReportProtocolFailure(originConn.RemoteAddr().String())
-				}
-
-				netpkg.ArmReset(originConn)
-
-				originConn.Close()
-
-				continue
-
-			}
-
-			log.Tracef("check TLS connection success, isTLS: %v custom: %v internal: %v", isTLS, custom, internal)
+			return
 
 		}
 
-		// Start a new goroutine to handle connection.
+		log.Tracef("check TLS connection success, isTLS: %v custom: %v internal: %v", isTLS, custom, internal)
 
-		go func(ctx context.Context, frpConn net.Conn) {
-			if lo.FromPtr(svr.cfg.Transport.TCPMux) && !internal {
+	}
 
-				fmuxCfg := fmux.DefaultConfig()
+	// Admission is over. Free the slot before serving, which may go on for
+	// hours.
 
-				fmuxCfg.KeepAliveInterval = time.Duration(svr.cfg.Transport.TCPMuxKeepaliveInterval) * time.Second
+	release()
 
-				// Use trace level for yamux logs
+	func(ctx context.Context, frpConn net.Conn) {
+		if lo.FromPtr(svr.cfg.Transport.TCPMux) && !internal {
 
-				fmuxCfg.LogOutput = xlog.NewTraceWriter(xlog.FromContextSafe(ctx))
+			fmuxCfg := fmux.DefaultConfig()
 
-				fmuxCfg.MaxStreamWindowSize = 6 * 1024 * 1024
+			fmuxCfg.KeepAliveInterval = time.Duration(svr.cfg.Transport.TCPMuxKeepaliveInterval) * time.Second
 
-				session, err := fmux.Server(frpConn, fmuxCfg)
+			// Use trace level for yamux logs
+
+			fmuxCfg.LogOutput = xlog.NewTraceWriter(xlog.FromContextSafe(ctx))
+
+			fmuxCfg.MaxStreamWindowSize = 6 * 1024 * 1024
+
+			session, err := fmux.Server(frpConn, fmuxCfg)
+			if err != nil {
+
+				log.Warnf("failed to create mux connection: %v", err)
+
+				frpConn.Close()
+
+				return
+
+			}
+
+			for {
+
+				stream, err := session.AcceptStream()
 				if err != nil {
 
-					log.Warnf("failed to create mux connection: %v", err)
+					log.Debugf("accept new mux stream error: %v", err)
 
-					frpConn.Close()
+					session.Close()
 
 					return
 
 				}
 
-				for {
+				go svr.handleConnection(ctx, stream, internal)
 
-					stream, err := session.AcceptStream()
-					if err != nil {
-
-						log.Debugf("accept new mux stream error: %v", err)
-
-						session.Close()
-
-						return
-
-					}
-
-					go svr.handleConnection(ctx, stream, internal)
-
-				}
-
-			} else {
-				svr.handleConnection(ctx, frpConn, internal)
 			}
-		}(ctx, c)
 
-	}
+		} else {
+			svr.handleConnection(ctx, frpConn, internal)
+		}
+	}(ctx, c)
 }
 
 func (svr *Service) HandleQUICListener(l *quic.Listener) {

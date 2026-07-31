@@ -97,6 +97,25 @@ type ProviderConfig struct {
 	TimeoutMs   int  `json:"timeoutMs,omitempty"`   // request timeout (default 800)
 	FailOpen    bool `json:"failOpen"`              // on error: allow (true) or block (false)
 	InsecureTLS bool `json:"insecureTLS,omitempty"` // skip TLS verify (self-signed)
+
+	// Blocking makes a source wait for the provider's first answer about it
+	// instead of being judged by the rules and the default policy while the
+	// lookup runs in the background. Off by default, and worth understanding
+	// before turning on.
+	//
+	// The query is an http round trip - up to TimeoutMs - and the paths that
+	// ask are the ones accepting traffic. On the dashboard listener and the udp
+	// read loop that time is spent with nothing else being served, so one
+	// unknown address delays everybody. An attack made of unknown addresses,
+	// which is what an attack is, turns the check into the outage.
+	//
+	// Asynchronous costs precision on exactly one connection per source: the
+	// first is decided without the provider, and every one after it has the
+	// answer. Against a scanner that connects once that changes nothing, since
+	// the verdict would have arrived too late to matter either way. Against a
+	// repeat visitor - which is what the logs are full of - it costs one
+	// connection and keeps the server responsive.
+	Blocking bool `json:"blocking,omitempty"`
 }
 
 // effective resolves frpcontrol into a concrete custom request.
@@ -119,6 +138,7 @@ func (p ProviderConfig) effective() ProviderConfig {
 		TimeoutMs:   p.TimeoutMs,
 		FailOpen:    p.FailOpen,
 		InsecureTLS: p.InsecureTLS,
+		Blocking:    p.Blocking,
 	}
 }
 
@@ -500,10 +520,15 @@ func (f *Firewall) Allow(remoteAddr string, port int) (bool, string) {
 // checkExternal returns whether ip is blocked according to the provider,
 // caching per ip. On error it honors FailOpen (fail-closed = blocked).
 //
-// Lookups for the same IP are collapsed into one query: the cache is only
-// written once an answer comes back, so without this a burst of connections
-// from one unknown IP would all miss and each fire its own request - turning
-// one visitor into a stampede against the provider.
+// With Blocking off - the default - a source the cache has no answer for is
+// reported as not blocked and the lookup is started in the background, so the
+// caller is never held up by an http round trip. The answer is there for that
+// source's next connection. See ProviderConfig.Blocking.
+//
+// Lookups for the same IP are collapsed into one query either way: the cache is
+// only written once an answer comes back, so without this a burst of
+// connections from one unknown IP would all miss and each fire its own request,
+// turning one visitor into a stampede against the provider.
 func (f *Firewall) checkExternal(ipStr string, p ProviderConfig, client *http.Client) (bool, string) {
 	for {
 		now := f.nowFn()
@@ -513,8 +538,13 @@ func (f *Firewall) checkExternal(ipStr string, p ProviderConfig, client *http.Cl
 			return e.blocked, e.reason
 		}
 		if ch, ok := f.repInFlight[ipStr]; ok {
-			// Someone is already asking about this IP. Wait for their answer
-			// instead of asking again, then re-read the cache.
+			if !p.Blocking {
+				// Somebody is already asking; this caller does not wait for it.
+				f.repMu.Unlock()
+				return false, ""
+			}
+			// Wait for their answer instead of asking again, then re-read the
+			// cache.
 			f.repMu.Unlock()
 			<-ch
 			continue
@@ -523,23 +553,41 @@ func (f *Firewall) checkExternal(ipStr string, p ProviderConfig, client *http.Cl
 		f.repInFlight[ipStr] = ch
 		f.repMu.Unlock()
 
-		blocked, reason, err := queryProvider(ipStr, p, client)
-		ttl := int64(p.CacheTTLSec)
-		if ttl <= 0 {
-			ttl = 300
+		if !p.Blocking {
+			go f.resolveExternal(ipStr, p, client, ch)
+			return false, ""
 		}
-		if err != nil {
-			blocked = !p.FailOpen // fail-closed by default
-			reason = "provider unavailable"
-			ttl = 10 // don't hammer a failing provider
-		}
+		f.resolveExternal(ipStr, p, client, ch)
+
 		f.repMu.Lock()
-		f.repCache[ipStr] = repEntry{blocked: blocked, reason: reason, exp: now + ttl}
-		delete(f.repInFlight, ipStr)
+		e, ok := f.repCache[ipStr]
 		f.repMu.Unlock()
-		close(ch) // wakes the waiters, which now find the cache filled
-		return blocked, reason
+		if !ok {
+			return false, ""
+		}
+		return e.blocked, e.reason
 	}
+}
+
+// resolveExternal performs one lookup and writes the verdict to the cache,
+// releasing whoever is waiting on ch. Runs on its own goroutine when the
+// provider is asynchronous, inline when it is not.
+func (f *Firewall) resolveExternal(ipStr string, p ProviderConfig, client *http.Client, ch chan struct{}) {
+	blocked, reason, err := queryProvider(ipStr, p, client)
+	ttl := int64(p.CacheTTLSec)
+	if ttl <= 0 {
+		ttl = 300
+	}
+	if err != nil {
+		blocked = !p.FailOpen // fail-closed by default
+		reason = "provider unavailable"
+		ttl = 10 // don't hammer a failing provider
+	}
+	f.repMu.Lock()
+	f.repCache[ipStr] = repEntry{blocked: blocked, reason: reason, exp: f.nowFn() + ttl}
+	delete(f.repInFlight, ipStr)
+	f.repMu.Unlock()
+	close(ch) // wakes any waiters, which now find the cache filled
 }
 
 // queryProvider asks the provider about one IP and reports its verdict, plus

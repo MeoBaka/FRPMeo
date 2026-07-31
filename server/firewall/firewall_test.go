@@ -395,7 +395,7 @@ func TestAllowSkipsProviderForItsOwnCall(t *testing.T) {
 	port := mustPort(t, srv.URL)
 	f := newTestFirewall(t, nil)
 	if err := f.SetConfig(Config{Enabled: true, Default: "allow", Provider: ProviderConfig{
-		Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k",
+		Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k", Blocking: true,
 		TimeoutMs: 500, CacheTTLSec: 60,
 	}}); err != nil {
 		t.Fatalf("set config: %v", err)
@@ -470,7 +470,7 @@ func TestBlankProviderReasonFallsBackToPlainReputation(t *testing.T) {
 
 	f := newTestFirewall(t, nil)
 	if err := f.SetConfig(Config{Enabled: true, Default: "allow", Provider: ProviderConfig{
-		Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k",
+		Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k", Blocking: true,
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +524,7 @@ func TestProviderReasonReachesTheVerdict(t *testing.T) {
 
 			f := newTestFirewall(t, nil)
 			if err := f.SetConfig(Config{Enabled: true, Default: "allow", Provider: ProviderConfig{
-				Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k",
+				Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k", Blocking: true,
 			}}); err != nil {
 				t.Fatalf("set config: %v", err)
 			}
@@ -545,7 +545,7 @@ func TestProviderReasonReachesTheVerdict(t *testing.T) {
 func TestSelfProviderNotSetForRemoteHost(t *testing.T) {
 	f := newTestFirewall(t, nil)
 	if err := f.SetConfig(Config{Enabled: true, Default: "allow", Provider: ProviderConfig{
-		Mode: "frpcontrol", FRPControlURL: "https://example.invalid:7002", FRPControlAPIKey: "k",
+		Mode: "frpcontrol", FRPControlURL: "https://example.invalid:7002", FRPControlAPIKey: "k", Blocking: true,
 	}}); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
@@ -568,7 +568,7 @@ func TestCheckExternalCollapsesConcurrentQueries(t *testing.T) {
 
 	f := newTestFirewall(t, nil)
 	if err := f.SetConfig(Config{Enabled: true, Default: "allow", Provider: ProviderConfig{
-		Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k",
+		Mode: "frpcontrol", FRPControlURL: srv.URL, FRPControlAPIKey: "k", Blocking: true,
 		TimeoutMs: 5000, CacheTTLSec: 60,
 	}}); err != nil {
 		t.Fatalf("set config: %v", err)

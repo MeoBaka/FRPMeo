@@ -106,6 +106,18 @@
         <div><label>Timeout (ms)</label><el-input v-model.number="snap.provider.timeoutMs" type="number" placeholder="800" /></div>
         <div class="fg-inline"><label>Fail-open</label><el-switch v-model="snap.provider.failOpen" /><span class="hint">off = block on error</span></div>
         <div class="fg-inline"><label>Insecure TLS</label><el-switch v-model="snap.provider.insecureTLS" /><span class="hint">self-signed https</span></div>
+        <div class="fg-inline fg-wide">
+          <label>Wait for the first answer</label>
+          <el-switch v-model="snap.provider.blocking" />
+          <span class="hint">
+            Off by default. The query is an http round trip and the callers are
+            accept loops, so waiting means one unknown address delays every
+            other client - and an attack is made of unknown addresses. Left off,
+            the first connection from a source is judged by the rules and the
+            default policy while the lookup runs behind it, and every connection
+            after that has the answer.
+          </span>
+        </div>
       </div>
 
       <!-- The provider form is free text, so it saves on demand rather than on
@@ -560,7 +572,7 @@ interface Provider {
   mode: string
   frpControlURL: string; frpControlAPIKey: string
   url: string; method: string; body: string; headers: Record<string, string>; blockedPath: string
-  cacheTTLSec: number; timeoutMs: number; failOpen: boolean; insecureTLS: boolean
+  cacheTTLSec: number; timeoutMs: number; failOpen: boolean; insecureTLS: boolean; blocking: boolean
 }
 interface RateProfile {
   enabled: boolean
@@ -610,7 +622,7 @@ interface Snap {
 }
 
 function defProvider(): Provider {
-  return { mode: 'off', frpControlURL: '', frpControlAPIKey: '', url: '', method: 'GET', body: '', headers: {}, blockedPath: '', cacheTTLSec: 300, timeoutMs: 800, failOpen: false, insecureTLS: false }
+  return { mode: 'off', frpControlURL: '', frpControlAPIKey: '', url: '', method: 'GET', body: '', headers: {}, blockedPath: '', cacheTTLSec: 300, timeoutMs: 800, failOpen: false, insecureTLS: false, blocking: false }
 }
 
 // Defaults mirror the server's. The tcp numbers come from XCord's speedy-login
