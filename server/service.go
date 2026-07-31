@@ -240,33 +240,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	}
 
 	if webServer != nil {
-
 		webServer.RouteRegister(svr.registerRouteHandlers)
-
-		// The dashboard opens a port of its own, which nothing else guards.
-
-		// Rejections are logged at debug on purpose: an exposed port is
-
-		// scanned continuously, and a warning per probe would be the same
-
-		// flood the firewall was turned on to stop.
-
-		if svr.rc.Firewall != nil {
-
-			port := cfg.WebServer.Port
-
-			webServer.SetConnFilter(func(remoteAddr string) bool {
-				ok, reason := svr.rc.Firewall.AllowWeb(remoteAddr, port)
-
-				if !ok {
-					log.Debugf("[FW] reject web %s reason: %s", remoteAddr, reason)
-				}
-
-				return ok
-			})
-
-		}
-
 	}
 
 	// Native firewall for user-connection access control (rules managed from
@@ -277,6 +251,49 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 	if svr.rc.Firewall, fwErr = firewall.New("frps_firewall.json"); fwErr != nil {
 		return nil, fmt.Errorf("init firewall: %v", fwErr)
+	}
+
+	// The dashboard opens a port of its own, which nothing else guards.
+
+	//
+
+	// This has to come after the firewall exists, not with the rest of the
+
+	// webServer setup above: svr.rc.Firewall is nil until the line above runs,
+
+	// so a filter installed there would be skipped and the port would be left
+
+	// open however the dashboard was configured.
+
+	//
+
+	// Rejections are logged at debug on purpose: an exposed port is scanned
+
+	// continuously, and a warning per probe would be the same flood the
+
+	// firewall was turned on to stop.
+
+	if webServer != nil && svr.rc.Firewall != nil {
+
+		port := cfg.WebServer.Port
+
+		webServer.SetConnFilter(func(remoteAddr string) bool {
+			ok, reason := svr.rc.Firewall.AllowWeb(remoteAddr, port)
+
+			if !ok {
+				log.Debugf("[FW] reject web %s reason: %s", remoteAddr, reason)
+
+				return false
+			}
+
+			// Rate limit after the rules, as everywhere else. The dashboard is
+			// a login form, so this is the layer that answers password
+			// guessing - rules only know addresses somebody already thought to
+			// list.
+
+			return svr.rc.Firewall.AdmitWeb(remoteAddr).Allowed
+		})
+
 	}
 
 	// Create tcpmux httpconnect multiplexer.
@@ -422,8 +439,24 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 		var allowSSH ssh.AllowFunc
 
-		if svr.rc.Firewall != nil {
-			allowSSH = svr.rc.Firewall.AllowControl
+		if fw := svr.rc.Firewall; fw != nil {
+			allowSSH = func(remoteAddr string, port int) (bool, string) {
+				ok, reason := fw.AllowControl(remoteAddr, port)
+				if !ok {
+					return false, reason
+				}
+
+				// Rate limit after the rules. An empty reason asks the gateway
+				// not to log this one: under a flood a line per rejection is a
+				// second flood, and a rate limit is the case where rejections
+				// arrive in bulk.
+
+				if v := fw.AdmitSSH(remoteAddr); !v.Allowed {
+					return false, ""
+				}
+
+				return true, reason
+			}
 		}
 
 		sshGateway, err := ssh.NewGateway(cfg.SSHTunnelGateway, cfg.BindAddr, svr.sshTunnelListener, allowSSH)

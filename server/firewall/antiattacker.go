@@ -77,6 +77,18 @@ type AntiAttackerConfig struct {
 	// is a bigger mistake than letting one flood through, so nobody gets it
 	// without asking.
 	Control ControlProfile `json:"control"`
+
+	// Web rate-limits the dashboard port, and SSH the ssh tunnel gateway port.
+	//
+	// Both are separate from Control rather than folded into it, even though the
+	// rules half of this firewall does group the control port and the ssh
+	// gateway under one switch. Grouping is right for allow and deny, which ask
+	// who the peer is; it is wrong here, because these three carry very
+	// different volumes. Only the control port has an frpc pool behind it, so
+	// only it needs a limit in the hundreds - handing the same number to a login
+	// form would leave a password guesser almost unhindered.
+	Web ControlProfile `json:"web"`
+	SSH ControlProfile `json:"ssh"`
 }
 
 // ControlProfile is the TCP shape again, plus the switch that arms it.
@@ -228,6 +240,39 @@ func defaultControlProfile() RateProfile {
 	}
 }
 
+// defaultWebProfile guards the dashboard, where the traffic is a person logging
+// in rather than a client pool. The window still has to fit a page load: the
+// dashboard is a single-page app, and a browser opens several connections for
+// its assets before anyone has typed anything. 60 per 5 s leaves room for that
+// and still cuts a password guesser down to a crawl.
+//
+// The ban is long on purpose. Nothing legitimate trips this, so the cost of a
+// five-minute lockout falls almost entirely on whoever is guessing.
+func defaultWebProfile() RateProfile {
+	return RateProfile{
+		WindowMs:      5000,
+		MaxPerWindow:  60,
+		BanViolations: 3,
+		BanSeconds:    300,
+		IdleForgetMs:  60000,
+		MaxTracked:    65536,
+	}
+}
+
+// defaultSSHProfile guards the ssh tunnel gateway. One client is one ssh
+// session there - the tunneled data travels over an internal listener, not
+// this port - so the limit can be far tighter than the control port's.
+func defaultSSHProfile() RateProfile {
+	return RateProfile{
+		WindowMs:      5000,
+		MaxPerWindow:  10,
+		BanViolations: 3,
+		BanSeconds:    300,
+		IdleForgetMs:  60000,
+		MaxTracked:    65536,
+	}
+}
+
 // defaultUDPProfile takes its per-source rates from XCord's during-login
 // anti-ddos settings (500 packets/s, 50000 bytes/s), which is the closest thing
 // to a figure tested against real traffic. The global caps stay at zero: see
@@ -300,6 +345,8 @@ func (c AntiAttackerConfig) normalize() AntiAttackerConfig {
 	c.HTTP.RateProfile = c.HTTP.normalize(defaultHTTPProfile().RateProfile)
 	c.UDP = c.UDP.normalize(defaultUDPProfile())
 	c.Control.RateProfile = c.Control.normalize(defaultControlProfile())
+	c.Web.RateProfile = c.Web.normalize(defaultWebProfile())
+	c.SSH.RateProfile = c.SSH.normalize(defaultSSHProfile())
 	proxies := make([]string, 0, len(c.Proxies))
 	for _, p := range c.Proxies {
 		if p = strings.TrimSpace(p); p != "" {

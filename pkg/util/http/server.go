@@ -207,6 +207,13 @@ func (l *filteredListener) Accept() (net.Conn, error) {
 			return c, nil
 		}
 
+		// RST rather than a graceful close. A peer that is being turned away
+		// has no use for an orderly shutdown, and a graceful close leaves this
+		// side holding a TIME_WAIT socket for two minutes per rejection -
+		// which is the wrong way round when the rejections are a flood.
+
+		netpkg.ArmReset(c)
+
 		_ = c.Close()
 
 	}

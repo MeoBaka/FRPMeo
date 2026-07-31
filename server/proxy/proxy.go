@@ -411,7 +411,11 @@ func (pxy *BaseProxy) startCommonTCPListenersHandler() {
 
 				}
 
-				xl.Infof("get a user connection [%s]", c.RemoteAddr().String())
+				// Logged inside handleUserTCPConnection, once the connection
+				// has been admitted. Announcing it here would mean a line per
+				// connection including every one the firewall is about to
+				// refuse - so a flood being turned away would still cost a
+				// flood of writes to the log.
 
 				go pxy.handleUserTCPConnection(c)
 
@@ -740,6 +744,16 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 			}
 		}
 	}
+
+	// Announced here rather than in the accept loop, so the line means the
+
+	// connection was admitted. In the accept loop it meant only that something
+
+	// arrived, which under a flood is a line per refused connection - the log
+
+	// becoming its own denial of service.
+
+	xl.Infof("get a user connection [%s]", remoteAddr)
 
 	cfg := pxy.configurer.GetBaseConfig()
 

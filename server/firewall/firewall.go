@@ -331,6 +331,11 @@ type Firewall struct {
 	// address, and it may also be reaching proxies from there; sharing a
 	// counter would let one of those starve the other.
 	ctlLimiter *limiter
+	// webLimiter and sshLimiter are likewise their own: the dashboard, the ssh
+	// gateway and the control port are three different doors, and someone
+	// hammering one must not use up another's budget.
+	webLimiter *limiter
+	sshLimiter *limiter
 }
 
 // New loads firewall state from path and starts a background expiry sweeper.
@@ -346,6 +351,8 @@ func New(path string) (*Firewall, error) {
 		httpLimiter: newLimiter(nil),
 		udpLimiter:  newUDPLimiter(nil),
 		ctlLimiter:  newLimiter(nil),
+		webLimiter:  newLimiter(nil),
+		sshLimiter:  newLimiter(nil),
 	}
 	b, err := os.ReadFile(path)
 	switch {
@@ -685,6 +692,8 @@ func (f *Firewall) applyAntiAttackerLocked(c AntiAttackerConfig) {
 	f.httpLimiter.reset()
 	f.udpLimiter.reset()
 	f.ctlLimiter.reset()
+	f.webLimiter.reset()
+	f.sshLimiter.reset()
 }
 
 // AdmitTCP rate-limits one accepted user connection, after the rules and the
@@ -742,6 +751,36 @@ func (f *Firewall) AdmitControl(remoteAddr string) Verdict {
 		return verdictAllow
 	}
 	return f.ctlLimiter.admit(clientKey(remoteAddr, "", nil), p)
+}
+
+// AdmitWeb rate-limits one connection to the dashboard port, after AllowWeb has
+// allowed it. Armed by AntiAttacker.Web.Protect.
+//
+// Worth knowing before turning it on: this page is what edits these settings.
+// The limit is sized so a page load cannot trip it, but somebody who sets it
+// very low can lock themselves out until frps_firewall.json is edited by hand.
+func (f *Firewall) AdmitWeb(remoteAddr string) Verdict {
+	f.mu.RLock()
+	p := f.aa.Web.RateProfile
+	on := f.enabled && f.aa.Enabled && f.aa.Web.Protect && p.Enabled
+	f.mu.RUnlock()
+	if !on {
+		return verdictAllow
+	}
+	return f.webLimiter.admit(clientKey(remoteAddr, "", nil), p)
+}
+
+// AdmitSSH rate-limits one connection to the ssh tunnel gateway port, after
+// AllowControl has allowed it. Armed by AntiAttacker.SSH.Protect.
+func (f *Firewall) AdmitSSH(remoteAddr string) Verdict {
+	f.mu.RLock()
+	p := f.aa.SSH.RateProfile
+	on := f.enabled && f.aa.Enabled && f.aa.SSH.Protect && p.Enabled
+	f.mu.RUnlock()
+	if !on {
+		return verdictAllow
+	}
+	return f.sshLimiter.admit(clientKey(remoteAddr, "", nil), p)
 }
 
 // AdmitUDP rate-limits one UDP packet of size bytes, for the udp and pe proxies

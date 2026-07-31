@@ -53,6 +53,14 @@ import (
 
 // name that port like any other.
 
+//
+
+// An empty reason on a rejection means "do not log this one". Rate limiting
+
+// uses it: rejections there arrive in bulk by definition, and a line each would
+
+// turn a flood being refused into a flood of its own against the disk.
+
 type AllowFunc func(remoteAddr string, port int) (ok bool, reason string)
 
 type Gateway struct {
@@ -179,7 +187,13 @@ func (g *Gateway) Run() {
 		if g.allow != nil {
 			if ok, reason := g.allow(conn.RemoteAddr().String(), g.bindPort); !ok {
 
-				log.Warnf("[FW] reject ssh %s reason: %s", conn.RemoteAddr(), reason)
+				if reason != "" {
+					log.Warnf("[FW] reject ssh %s reason: %s", conn.RemoteAddr(), reason)
+				}
+
+				// RST, so a refusal leaves no TIME_WAIT socket behind.
+
+				netpkg.ArmReset(conn)
 
 				conn.Close()
 

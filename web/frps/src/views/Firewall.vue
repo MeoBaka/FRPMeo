@@ -301,6 +301,52 @@
           <el-button @click="save" :loading="saving">Save</el-button>
         </div>
 
+        <el-divider content-position="left">Dashboard port - counted per connection</el-divider>
+        <div class="bar">
+          <el-switch v-model="snap.antiAttacker.web.protect" @change="save" />
+          <span class="hint">
+            This page's own port. Rules only stop addresses somebody thought to
+            list, so this is the layer that answers password guessing. Careful:
+            this page is what edits these settings, and a limit set very low can
+            lock you out until frps_firewall.json is edited on the server. The
+            default leaves room for a page load, which opens several connections
+            for its assets before anyone types anything.
+          </span>
+        </div>
+        <div class="bar" style="margin-top:8px" v-if="snap.antiAttacker.web.protect">
+          <label class="lbl">Window (ms)</label>
+          <el-input v-model.number="snap.antiAttacker.web.windowMs" type="number" class="w120" />
+          <label class="lbl">Max / window</label>
+          <el-input v-model.number="snap.antiAttacker.web.maxPerWindow" type="number" class="w90" />
+          <label class="lbl">Ban after</label>
+          <el-input v-model.number="snap.antiAttacker.web.banViolations" type="number" class="w90" />
+          <label class="lbl">Ban (s)</label>
+          <el-input v-model.number="snap.antiAttacker.web.banSeconds" type="number" class="w90" />
+          <el-button @click="save" :loading="saving">Save</el-button>
+        </div>
+
+        <el-divider content-position="left">SSH gateway port - counted per connection</el-divider>
+        <div class="bar">
+          <el-switch v-model="snap.antiAttacker.ssh.protect" @change="save" />
+          <span class="hint">
+            The ssh tunnel gateway, when one is configured. One client is one
+            ssh session here - the tunnelled data travels over an internal
+            listener, not this port - so the limit can be far tighter than the
+            control port's.
+          </span>
+        </div>
+        <div class="bar" style="margin-top:8px" v-if="snap.antiAttacker.ssh.protect">
+          <label class="lbl">Window (ms)</label>
+          <el-input v-model.number="snap.antiAttacker.ssh.windowMs" type="number" class="w120" />
+          <label class="lbl">Max / window</label>
+          <el-input v-model.number="snap.antiAttacker.ssh.maxPerWindow" type="number" class="w90" />
+          <label class="lbl">Ban after</label>
+          <el-input v-model.number="snap.antiAttacker.ssh.banViolations" type="number" class="w90" />
+          <label class="lbl">Ban (s)</label>
+          <el-input v-model.number="snap.antiAttacker.ssh.banSeconds" type="number" class="w90" />
+          <el-button @click="save" :loading="saving">Save</el-button>
+        </div>
+
         <el-divider content-position="left">UDP - counted per packet</el-divider>
         <div class="bar">
           <el-switch v-model="snap.antiAttacker.udp.enabled" @change="save" />
@@ -403,7 +449,10 @@ interface UDPProfile {
 interface ControlProfile extends RateProfile { protect: boolean }
 interface AntiAttacker {
   enabled: boolean; scope: string; proxies: string[]
-  tcp: RateProfile; http: HTTPProfile; udp: UDPProfile; control: ControlProfile
+  tcp: RateProfile; http: HTTPProfile; udp: UDPProfile
+  // Three separate doors into frps, three budgets: hammering one must not
+  // spend another's.
+  control: ControlProfile; web: ControlProfile; ssh: ControlProfile
 }
 interface Snap {
   enabled: boolean; controlPort: boolean; webPort: boolean; default: string
@@ -430,6 +479,10 @@ function defAntiAttacker(): AntiAttacker {
     udp: { enabled: true, windowMs: 1000, maxPacketsPerWindow: 500, maxBytesPerWindow: 50000, globalMaxPacketsPerWindow: 0, globalMaxBytesPerWindow: 0, idleForgetMs: 30000, maxTracked: 65536 },
     // Far looser than tcp: a frpc pool is many connections from one address.
     control: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 200, banViolations: 3, banSeconds: 60, idleForgetMs: 40000, maxTracked: 65536 },
+    // Tighter than control - a login form, not a pool - with a long ban, since
+    // nothing legitimate trips it.
+    web: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 60, banViolations: 3, banSeconds: 300, idleForgetMs: 60000, maxTracked: 65536 },
+    ssh: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 10, banViolations: 3, banSeconds: 300, idleForgetMs: 60000, maxTracked: 65536 },
   }
 }
 
@@ -511,6 +564,8 @@ async function load() {
       http: { ...aaDef.http, ...(aa.http || {}), trustedProxies: aa.http?.trustedProxies || [] },
       udp: { ...aaDef.udp, ...(aa.udp || {}) },
       control: { ...aaDef.control, ...(aa.control || {}) },
+      web: { ...aaDef.web, ...(aa.web || {}) },
+      ssh: { ...aaDef.ssh, ...(aa.ssh || {}) },
     }
   } catch (e: any) {
     ElMessage.error('Load failed: ' + (e.message || e))

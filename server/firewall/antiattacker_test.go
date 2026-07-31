@@ -783,6 +783,108 @@ func TestControlProfileDefaultIsLooserThanTCP(t *testing.T) {
 	}
 }
 
+// --- dashboard and ssh gateway ---
+
+func TestAdmitWebAndSSHOffByDefault(t *testing.T) {
+	f := newTestFirewall(t, nil)
+	for range 200 {
+		if !f.AdmitWeb("1.2.3.4:1000").Allowed {
+			t.Fatal("the dashboard was rate limited while AntiAttacker was off")
+		}
+		if !f.AdmitSSH("1.2.3.4:1000").Allowed {
+			t.Fatal("the ssh gateway was rate limited while AntiAttacker was off")
+		}
+	}
+}
+
+func TestAdmitWebNeedsItsOwnSwitch(t *testing.T) {
+	f := newAAFirewall(t, AntiAttackerConfig{
+		Enabled: true,
+		Control: ControlProfile{Protect: true, RateProfile: RateProfile{Enabled: true, MaxPerWindow: 1}},
+		Web:     ControlProfile{RateProfile: RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 1}},
+	})
+	for range 10 {
+		if !f.AdmitWeb("1.2.3.4:1000").Allowed {
+			t.Fatal("the dashboard was limited without Web.Protect - protecting the control port must not lock the UI")
+		}
+	}
+}
+
+func TestAdmitWebLimits(t *testing.T) {
+	f := newAAFirewall(t, AntiAttackerConfig{
+		Enabled: true,
+		Web: ControlProfile{
+			Protect:     true,
+			RateProfile: RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 2, BanViolations: 99},
+		},
+	})
+	f.AdmitWeb("1.2.3.4:1000")
+	f.AdmitWeb("1.2.3.4:1000")
+	if f.AdmitWeb("1.2.3.4:1000").Allowed {
+		t.Fatal("3rd dashboard connection allowed past a limit of 2")
+	}
+}
+
+func TestAdmitSSHLimits(t *testing.T) {
+	f := newAAFirewall(t, AntiAttackerConfig{
+		Enabled: true,
+		SSH: ControlProfile{
+			Protect:     true,
+			RateProfile: RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 2, BanViolations: 99},
+		},
+	})
+	f.AdmitSSH("1.2.3.4:1000")
+	f.AdmitSSH("1.2.3.4:1000")
+	if f.AdmitSSH("1.2.3.4:1000").Allowed {
+		t.Fatal("3rd ssh connection allowed past a limit of 2")
+	}
+}
+
+// Four doors, four budgets. Hammering one must not spend another's.
+func TestControlWebSSHAndProxyCountersAreSeparate(t *testing.T) {
+	one := RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 1, BanViolations: 99}
+	f := newAAFirewall(t, AntiAttackerConfig{
+		Enabled: true,
+		TCP:     one,
+		Control: ControlProfile{Protect: true, RateProfile: one},
+		Web:     ControlProfile{Protect: true, RateProfile: one},
+		SSH:     ControlProfile{Protect: true, RateProfile: one},
+	})
+	const addr = "1.2.3.4:1000"
+
+	// Spend the whole budget on the dashboard.
+	f.AdmitWeb(addr)
+	if f.AdmitWeb(addr).Allowed {
+		t.Fatal("the dashboard limit did not apply")
+	}
+
+	for name, allowed := range map[string]bool{
+		"control": f.AdmitControl(addr).Allowed,
+		"ssh":     f.AdmitSSH(addr).Allowed,
+		"proxy":   f.AdmitTCP(addr, "", "web").Allowed,
+	} {
+		if !allowed {
+			t.Errorf("dashboard traffic used up the %s budget for the same address", name)
+		}
+	}
+}
+
+// A password guesser gets far less room than an frpc pool needs.
+func TestWebAndSSHDefaultsAreTighterThanControl(t *testing.T) {
+	c := AntiAttackerConfig{}.normalize()
+	if c.Web.MaxPerWindow >= c.Control.MaxPerWindow {
+		t.Errorf("web default %d is not below the control default %d", c.Web.MaxPerWindow, c.Control.MaxPerWindow)
+	}
+	if c.SSH.MaxPerWindow >= c.Control.MaxPerWindow {
+		t.Errorf("ssh default %d is not below the control default %d", c.SSH.MaxPerWindow, c.Control.MaxPerWindow)
+	}
+	// ...but the dashboard still has to survive a page load, which opens
+	// several connections for its assets before anyone types anything.
+	if c.Web.MaxPerWindow < 20 {
+		t.Errorf("web default %d is too tight for a single-page app's asset requests", c.Web.MaxPerWindow)
+	}
+}
+
 func TestValidateAntiAttacker(t *testing.T) {
 	ok := AntiAttackerConfig{HTTP: HTTPProfile{TrustedProxies: []string{"10.0.0.0/8", "1.2.3.4", "::1", ""}}}
 	if err := ValidateAntiAttacker(ok); err != nil {
