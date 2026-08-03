@@ -268,21 +268,23 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 	//
 
-	// Rejections are logged at debug on purpose: an exposed port is scanned
+	// Decisions go to the firewall's own reporter rather than a log line each:
 
-	// continuously, and a warning per probe would be the same flood the
+	// an exposed port is scanned continuously, and a line per probe would be
 
-	// firewall was turned on to stop.
+	// the same flood the firewall was turned on to stop.
 
 	if webServer != nil && svr.rc.Firewall != nil {
 
 		port := cfg.WebServer.Port
 
+		fw := svr.rc.Firewall
+
 		webServer.SetConnFilter(func(remoteAddr string) bool {
-			ok, reason := svr.rc.Firewall.AllowWeb(remoteAddr, port)
+			ok, reason := fw.AllowWeb(remoteAddr, port)
 
 			if !ok {
-				log.Debugf("[FW] reject web %s reason: %s", remoteAddr, reason)
+				fw.NoteDecision(firewall.SurfaceWeb, false, reason, remoteAddr)
 
 				return false
 			}
@@ -292,7 +294,15 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 			// guessing - rules only know addresses somebody already thought to
 			// list.
 
-			return svr.rc.Firewall.AdmitWeb(remoteAddr).Allowed
+			if v := fw.AdmitWeb(remoteAddr); !v.Allowed {
+				fw.NoteDecision(firewall.SurfaceWeb, false, v.Reason, remoteAddr)
+
+				return false
+			}
+
+			fw.NoteDecision(firewall.SurfaceWeb, true, reason, remoteAddr)
+
+			return true
 		})
 
 		// And a wrong password counts as a strike, which is the same evidence
@@ -392,6 +402,27 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		return nil, fmt.Errorf("create server listener error, %v", err)
 	}
 
+	// The firewall goes in front of the multiplexer rather than behind it.
+	// Everything the multiplexer hands on has already had its opening bytes
+	// read, under a timeout, on a goroutine spawned per connection without a
+	// bound - so a check placed after it never sees a silent peer at all. See
+	// firewall.GuardControl.
+
+	// Unless the vhost muxers share this port, in which case only the rules can
+	// be decided here: the rest of what arrives is a tunneled site's visitors,
+	// and the control rate limit is not sized for those. It goes on the control
+	// listeners below instead, once the multiplexer has told the two apart.
+
+	sharedWithVhost := httpMuxOn || httpsMuxOn
+
+	if svr.rc.Firewall != nil {
+		if sharedWithVhost {
+			ln = svr.rc.Firewall.GuardControlRules(ln)
+		} else {
+			ln = svr.rc.Firewall.GuardControl(ln)
+		}
+	}
+
 	svr.muxer = mux.NewMux(ln)
 
 	svr.muxer.SetKeepAlive(time.Duration(cfg.Transport.TCPKeepAlive) * time.Second)
@@ -415,6 +446,14 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		svr.kcpListener, err = netpkg.ListenKcp(address)
 		if err != nil {
 			return nil, fmt.Errorf("listen on kcp udp address %s error: %v", address, err)
+		}
+
+		// Guarded like the tcp port. It is the one other listener clients dial
+		// directly, and it is not behind the multiplexer, so this is where its
+		// firewall check lives now that admitAndServe no longer runs one.
+
+		if svr.rc.Firewall != nil {
+			svr.kcpListener = svr.rc.Firewall.GuardControl(svr.kcpListener)
 		}
 
 		log.Infof("frps kcp listen on udp %s", address)
@@ -456,17 +495,24 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 			allowSSH = func(remoteAddr string, port int) (bool, string) {
 				ok, reason := fw.AllowControl(remoteAddr, port)
 				if !ok {
-					return false, reason
-				}
+					fw.NoteDecision(firewall.SurfaceSSH, false, reason, remoteAddr)
 
-				// Rate limit after the rules. An empty reason asks the gateway
-				// not to log this one: under a flood a line per rejection is a
-				// second flood, and a rate limit is the case where rejections
-				// arrive in bulk.
+					// An empty reason asks the gateway not to log this one:
+					// the firewall's own reporter covers it, and under a flood
+					// a line per rejection is a second flood.
 
-				if v := fw.AdmitSSH(remoteAddr); !v.Allowed {
 					return false, ""
 				}
+
+				// Rate limit after the rules.
+
+				if v := fw.AdmitSSH(remoteAddr); !v.Allowed {
+					fw.NoteDecision(firewall.SurfaceSSH, false, v.Reason, remoteAddr)
+
+					return false, ""
+				}
+
+				fw.NoteDecision(firewall.SurfaceSSH, true, reason, remoteAddr)
 
 				return true, reason
 			}
@@ -573,6 +619,21 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 		return int(data[0]) == netpkg.FRPTLSHeadByte || int(data[0]) == 0x16
 	})
+
+	// The other half of the split made above the multiplexer. These three are
+	// what it sorts client control traffic into, so this is the first point on
+	// a shared port where the control rate limit can be applied to clients
+	// without also applying it to a tunneled site's visitors.
+
+	if sharedWithVhost && svr.rc.Firewall != nil {
+
+		svr.listener = svr.rc.Firewall.GuardControlRate(svr.listener)
+
+		svr.websocketListener = svr.rc.Firewall.GuardControlRate(svr.websocketListener)
+
+		svr.tlsListener = svr.rc.Firewall.GuardControlRate(svr.tlsListener)
+
+	}
 
 	// Create nat hole controller.
 
@@ -1057,16 +1118,17 @@ func localPort(addr net.Addr) int {
 
 // TODO(fatedier): Pass some parameters of listener/connection through context to avoid passing too many parameters.
 
-// maxPendingHandshakes bounds how many connections may be in the middle of
-// being admitted at once - the firewall check and the TLS sniff.
+// maxPendingHandshakes bounds how many connections may be in the middle of the
+// TLS sniff at once.
 //
-// Both of those can block: the reputation provider is an http round trip, and
-// the TLS sniff is a read that waits for the peer to say something. Running
-// them one after another in the accept loop, which is what used to happen,
-// meant a single silent peer held up every other client for the whole read
-// timeout. Handling them concurrently fixes that; a bound is what stops the fix
-// from being its own problem, because a flood would otherwise become one
-// goroutine per connection.
+// The sniff is a read that waits for the peer to say something. Running it in
+// the accept loop, which is what used to happen, meant a single silent peer
+// held up every other client for the whole read timeout. Handling it
+// concurrently fixes that; a bound is what stops the fix from being its own
+// problem, because a flood would otherwise become one goroutine per connection.
+//
+// The firewall is not part of this stage any more - it runs on the raw
+// listener, before the multiplexer, so most of a flood never reaches here.
 //
 // At the limit new connections are refused outright. Turning somebody away
 // quickly is a better answer than queueing them behind work that is already not
@@ -1126,43 +1188,11 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 // admitAndServe runs the checks that may block, then hands the connection on.
 // Called on its own goroutine - see maxPendingHandshakes for why.
 func (svr *Service) admitAndServe(c net.Conn, internal bool, release func()) {
-	// Native firewall: drop blocked clients before the TLS handshake.
-
-	// Skipped for internal listeners (ssh tunnel gateway), which are not
-
-	// real remote peers.
-
-	if !internal && svr.rc.Firewall != nil {
-		if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String(), localPort(c.LocalAddr())); !ok {
-
-			log.Warnf("[FW] reject control %s reason: %s", c.RemoteAddr(), reason)
-
-			// RST rather than a graceful close: a rejected peer has no use
-			// for an orderly shutdown, and TIME_WAIT sockets piling up on
-			// the side doing the rejecting is what a flood is counting on.
-
-			netpkg.ArmReset(c)
-
-			c.Close()
-
-			return
-
-		}
-
-		// Rate limit after the rules, matching the order on the proxy
-		// paths. Silent, because a flood that is being refused must not
-		// also become a flood of log lines.
-
-		if v := svr.rc.Firewall.AdmitControl(c.RemoteAddr().String()); !v.Allowed {
-
-			netpkg.ArmReset(c)
-
-			c.Close()
-
-			return
-
-		}
-	}
+	// No firewall check here. Every listener that carries real remote peers is
+	// wrapped by firewall.GuardControl at the point it is created, which is
+	// upstream of the protocol multiplexer and so upstream of this. Checking
+	// again would count one connection twice against the rate limit and halve
+	// every configured limit.
 
 	// inject xlog object into net.Conn context
 
@@ -1289,10 +1319,28 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 
 		// Native firewall: drop blocked clients before any stream is accepted.
 
-		if svr.rc.Firewall != nil {
-			if ok, reason := svr.rc.Firewall.AllowControl(c.RemoteAddr().String(), localPort(c.LocalAddr())); !ok {
+		if fw := svr.rc.Firewall; fw != nil {
 
-				log.Warnf("[FW] reject quic control %s reason: %s", c.RemoteAddr(), reason)
+			remoteAddr := c.RemoteAddr().String()
+
+			// Same order and the same reporting as the tcp listener, so a
+			// flood over quic is not the one that goes unmentioned. No RST to
+			// arm here - quic closes without leaving TIME_WAIT behind.
+
+			ok, reason := fw.AllowControl(remoteAddr, localPort(c.LocalAddr()))
+			if !ok {
+
+				fw.NoteDecision(firewall.SurfaceControl, false, reason, remoteAddr)
+
+				_ = c.CloseWithError(0, "")
+
+				continue
+
+			}
+
+			if v := fw.AdmitControl(remoteAddr); !v.Allowed {
+
+				fw.NoteDecision(firewall.SurfaceControl, false, v.Reason, remoteAddr)
 
 				_ = c.CloseWithError(0, "")
 
@@ -1300,16 +1348,7 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 
 			}
 
-			// Same order as the tcp listener: rules, then the rate limit. No
-			// RST to arm here - quic closes without leaving TIME_WAIT behind.
-
-			if v := svr.rc.Firewall.AdmitControl(c.RemoteAddr().String()); !v.Allowed {
-
-				_ = c.CloseWithError(0, "")
-
-				continue
-
-			}
+			fw.NoteDecision(firewall.SurfaceControl, true, reason, remoteAddr)
 		}
 
 		// Start a new goroutine to handle connection.

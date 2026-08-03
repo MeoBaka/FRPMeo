@@ -51,6 +51,7 @@ import (
 	"github.com/fatedier/frp/pkg/util/vhost"
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server/controller"
+	"github.com/fatedier/frp/server/firewall"
 	"github.com/fatedier/frp/server/metrics"
 )
 
@@ -600,12 +601,12 @@ func (pxy *BaseProxy) newAdmitFilter(what string, port int, ttl time.Duration) f
 
 	check := func(remoteAddr string) bool {
 		if fw != nil {
-			if ok, reason := fw.Allow(remoteAddr, port); !ok {
+			ok, reason := fw.Allow(remoteAddr, port)
 
-				xl.Warnf("[FW] reject %s %s reason: %s", what, remoteAddr, reason)
+			fw.NoteDecision(firewall.SurfaceProxy, ok, reason, remoteAddr)
 
+			if !ok {
 				return false
-
 			}
 		}
 
@@ -714,13 +715,14 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 	if fw := rc.Firewall; fw != nil {
 
-		// The run id and the proxy name are already prefixed by the logger, so
-		// the message carries neither - a rejection is common enough that
-		// repeating them costs more than it tells.
+		// Decisions are counted by the firewall's own reporter rather than
+		// logged one per connection: a rejection here is common enough that a
+		// line each turns a flood into a second flood against the disk.
 
-		if ok, reason := fw.Allow(remoteAddr, dstPort); !ok {
+		ok, reason := fw.Allow(remoteAddr, dstPort)
+		if !ok {
 
-			xl.Warnf("[FW] reject %s reason: %s", remoteAddr, reason)
+			fw.NoteDecision(firewall.SurfaceProxy, false, reason, remoteAddr)
 
 			netpkg.ArmReset(userConn)
 
@@ -730,12 +732,12 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 		// Rate limiting is skipped for the visitor-authenticated types, which
 		// proved a shared secret to get here - see
-		// BaseProxy.visitorAuthenticated. Unlike the rule above it is silent:
-		// logging a line per rejection turns a flood into a second flood
-		// against the disk.
+		// BaseProxy.visitorAuthenticated.
 
 		if !pxy.visitorAuthenticated {
 			if v := fw.AdmitTCP(remoteAddr, pxy.GetUserInfo().User, pxy.GetName()); !v.Allowed {
+
+				fw.NoteDecision(firewall.SurfaceProxy, false, v.Reason, remoteAddr)
 
 				netpkg.ArmReset(userConn)
 
@@ -750,6 +752,8 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 			ok, release := fw.AcquireConn(remoteAddr)
 			if !ok {
 
+				fw.NoteDecision(firewall.SurfaceProxy, false, "concurrency cap", remoteAddr)
+
 				netpkg.ArmReset(userConn)
 
 				return
@@ -759,6 +763,8 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 			defer release()
 
 		}
+
+		fw.NoteDecision(firewall.SurfaceProxy, true, reason, remoteAddr)
 	}
 
 	// Announced here rather than in the accept loop, so the line means the

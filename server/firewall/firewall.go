@@ -366,6 +366,10 @@ type Firewall struct {
 	conc      *concurrency
 	startedAt int64 // ms, for the grace period
 	nowMsFn   func() int64
+
+	// monitors aggregate what each surface decided, so a flood costs a line
+	// every few seconds instead of one per connection.
+	monitors map[Surface]*monitor
 }
 
 // New loads firewall state from path and starts a background expiry sweeper.
@@ -389,6 +393,10 @@ func New(path string) (*Firewall, error) {
 		conc:        newConcurrency(),
 		nowMsFn:     func() int64 { return time.Now().UnixMilli() },
 		startedAt:   time.Now().UnixMilli(),
+		monitors:    make(map[Surface]*monitor, len(surfaces)),
+	}
+	for _, s := range surfaces {
+		f.monitors[s] = newMonitor(string(s))
 	}
 	b, err := os.ReadFile(path)
 	switch {
@@ -419,6 +427,7 @@ func New(path string) (*Firewall, error) {
 	f.mu.Unlock()
 
 	go f.sweep()
+	go f.reportSurfaces()
 	return f, nil
 }
 
