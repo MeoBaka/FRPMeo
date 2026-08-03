@@ -77,6 +77,10 @@ type Gateway struct {
 	// firewall is configured, and every peer is let through.
 
 	allow AllowFunc
+
+	// handshakeByteLimit is read per connection so a change made through the
+	// dashboard reaches the next peer, not the next restart.
+	handshakeByteLimit func() int
 }
 
 func NewGateway(
@@ -211,12 +215,22 @@ func (g *Gateway) Close() error {
 	return g.ln.Close()
 }
 
+// SetHandshakeByteLimit installs the source of the per-connection ceiling on
+// what a peer may send before its ssh handshake completes. Must be called
+// before Run.
+func (g *Gateway) SetHandshakeByteLimit(fn func() int) {
+	g.handshakeByteLimit = fn
+}
+
 func (g *Gateway) handleConn(conn net.Conn) {
 	defer conn.Close()
 
 	ts, err := NewTunnelServer(conn, g.sshConfig, g.peerServerListener)
 	if err != nil {
 		return
+	}
+	if g.handshakeByteLimit != nil {
+		ts.handshakeByteLimit = g.handshakeByteLimit()
 	}
 
 	if err := ts.Run(); err != nil {

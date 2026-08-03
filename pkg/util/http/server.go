@@ -214,6 +214,23 @@ func (s *Server) Address() string {
 	return s.addr
 }
 
+// SetHandshakeByteLimit caps how much a peer may send before it has finished
+// asking for something - the request line and headers, and the TLS handshake
+// underneath them when the dashboard serves https.
+//
+// The same measurement the control port makes, in the form net/http already
+// offers. A peer that opens a connection and pushes megabytes of headers costs
+// the memory a pending request holds while breaking no rate at all: one
+// connection is one connection however much it carries.
+//
+// Zero leaves net/http's own default in place. Must be called before Run.
+func (s *Server) SetHandshakeByteLimit(n int) {
+	if n <= 0 {
+		return
+	}
+	s.hs.MaxHeaderBytes = n
+}
+
 // SetConnFilter installs a check run on every accepted connection. It is asked
 
 // before the TLS handshake and before a single byte is read, so a peer it turns

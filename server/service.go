@@ -280,6 +280,20 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 		fw := svr.rc.Firewall
 
+		// The same ceiling the control port applies, in the form net/http
+
+		// offers: how much a peer may send before it has finished asking for
+
+		// anything. Read once here rather than per connection, because
+
+		// net/http takes it at construction - a later change through the
+
+		// dashboard reaches the control port immediately and this one after a
+
+		// restart.
+
+		webServer.SetHandshakeByteLimit(fw.HandshakeByteLimit())
+
 		webServer.SetConnFilter(func(remoteAddr string) bool {
 			ok, reason := fw.AllowWeb(remoteAddr, port)
 
@@ -523,6 +537,14 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 			return nil, fmt.Errorf("create ssh gateway error: %v", err)
 		}
 
+		// Read per connection, so a change made through the dashboard reaches
+
+		// the next peer rather than the next restart.
+
+		if fw := svr.rc.Firewall; fw != nil {
+			sshGateway.SetHandshakeByteLimit(fw.HandshakeByteLimit)
+		}
+
 		svr.sshTunnelGateway = sshGateway
 
 		log.Infof("frps sshTunnelGateway listen on port %d", cfg.SSHTunnelGateway.BindPort)
@@ -756,7 +778,24 @@ func (svr *Service) Close() error {
 func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, internal bool) {
 	xl := xlog.FromContextSafe(ctx)
 
+	// Reading the login is the last step before frps knows who this is, and it
+	// is the only one the quic listener has - quic did its own tls, so nothing
+	// upstream of here capped it. Capping it here covers every transport that
+	// speaks frp: tcp, kcp, websocket, tls and quic alike.
+
+	doneHandshake := func() {}
+
+	if svr.rc.Firewall != nil {
+		conn, doneHandshake = netpkg.LimitHandshake(conn, svr.rc.Firewall.HandshakeByteLimit())
+	}
+
 	acceptedConn, err := svr.acceptConnection(ctx, conn)
+
+	// Lifted before anything is served, for the reason it is everywhere else:
+	// the tunnel's bytes are not the handshake's.
+
+	doneHandshake()
+
 	if err != nil {
 
 		// Anything that reaches the bind port but is not a frp client lands
