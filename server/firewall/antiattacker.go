@@ -780,13 +780,28 @@ func (l *limiter) admit(key string, p RateProfile) Verdict {
 // Counted in whole seconds rather than a sliding window: the number only has to
 // be right enough to flip a switch, and a second of granularity keeps this to
 // two integers on a path that every connection walks.
+//
+// The state is held as "when was the rate last over the line" rather than as a
+// boolean, because a boolean can only change when something calls in, and the
+// end of an attack is exactly when nothing does. A flood that stops dead leaves
+// no connection behind to notice it stopped, so a flag set on the way up would
+// stay up until the next client arrived - keeping the shortened handshake
+// timeout in force against honest traffic for as long as the server was quiet.
+// A timestamp compared against the clock has no such gap.
 type attackState struct {
-	mu       sync.Mutex
-	nowMs    func() int64
-	second   int64 // unix second the count belongs to
-	count    int
-	under    bool
-	calmFrom int64 // ms since the rate first dropped below the threshold
+	mu     sync.Mutex
+	nowMs  func() int64
+	second int64 // unix second the count belongs to
+	count  int
+
+	// overAt is when a finished second was last judged to be at or above the
+	// threshold. Zero means it never has been.
+	overAt int64
+
+	// cooldownMs is remembered from the last note so isUnder can answer
+	// without being handed the config, which the callers that ask - a timeout,
+	// a status page - do not have.
+	cooldownMs int64
 }
 
 func newAttackState(nowMs func() int64) *attackState {
@@ -809,21 +824,12 @@ func (a *attackState) note(c AttackConfig) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	a.cooldownMs = int64(c.CooldownSec) * 1000
+
 	if sec != a.second {
 		// A second finished. Judge it, then start the next one.
 		if a.count >= c.ConnectionsPerSec {
-			a.under = true
-			a.calmFrom = 0
-		} else if a.under {
-			// Below the line. Stay in the attack state until it has been quiet
-			// for the whole cooldown, so a flood pacing itself around the
-			// threshold cannot flip the state back and forth.
-			if a.calmFrom == 0 {
-				a.calmFrom = now
-			} else if now-a.calmFrom >= int64(c.CooldownSec)*1000 {
-				a.under = false
-				a.calmFrom = 0
-			}
+			a.overAt = now
 		}
 		a.second = sec
 		a.count = 0
@@ -831,15 +837,24 @@ func (a *attackState) note(c AttackConfig) {
 	a.count++
 }
 
+// isUnder reports whether the attack state is up: the rate was over the line
+// recently enough that the cooldown has not run out.
+//
+// Holding for the whole cooldown is what stops a flood pacing itself around the
+// threshold from flipping the state back and forth.
 func (a *attackState) isUnder() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.under
+
+	if a.overAt == 0 {
+		return false
+	}
+	return a.nowMs()-a.overAt <= a.cooldownMs
 }
 
 func (a *attackState) reset() {
 	a.mu.Lock()
-	a.second, a.count, a.under, a.calmFrom = 0, 0, false, 0
+	a.second, a.count, a.overAt, a.cooldownMs = 0, 0, 0, 0
 	a.mu.Unlock()
 }
 

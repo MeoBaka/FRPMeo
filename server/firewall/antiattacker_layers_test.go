@@ -93,6 +93,32 @@ func TestAttackStateTurnsOnAndCoolsDown(t *testing.T) {
 	}
 }
 
+// The end of a flood is exactly when nothing calls in, so the state must clear
+// on the clock alone. Held as a flag set on the way up, it stayed up until the
+// next connection happened to arrive - which on a server that had just been
+// flooded off the air could be a very long time, with the shortened handshake
+// timeout working against honest clients the whole while.
+func TestAttackStateClearsWithNoTrafficAtAll(t *testing.T) {
+	c := &fakeClock{ms: 1_000_000}
+	a := newAttackState(c.now)
+	cfg := AttackConfig{Enabled: true, ConnectionsPerSec: 5, CooldownSec: 3}
+
+	for range 10 {
+		a.note(cfg)
+	}
+	c.advance(1 * time.Second)
+	a.note(cfg)
+	if !a.isUnder() {
+		t.Fatal("a second over the threshold did not raise the attack state")
+	}
+
+	// The flood stops dead. Nothing calls note again, ever.
+	c.advance(4 * time.Second)
+	if a.isUnder() {
+		t.Fatal("attack state never cleared once the flood stopped, so it would stay up until the next client arrived")
+	}
+}
+
 func TestAttackStateOffByDefault(t *testing.T) {
 	c := &fakeClock{ms: 1_000_000}
 	a := newAttackState(c.now)
