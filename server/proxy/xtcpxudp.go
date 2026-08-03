@@ -67,6 +67,11 @@ func (pxy *XTCPXUDPProxy) Run() (remoteAddr string, err error) {
 		allowUsers = []string{pxy.GetUserInfo().User}
 	}
 
+	// Both halves reach the same visitor over the one relay listener, so they
+	// share a tracker: a visitor using tcp and udp is one connection in the
+	// stats, not two. Set before the listener starts accepting.
+	pxy.trackPeers()
+
 	// Relay fallback path: a secret visitor listener (same as stcp/sudp) so the
 	// visitor can reach this provider through frps when hole punching fails.
 	if err = pxy.startVisitorListener(pxy.cfg.Secretkey, allowUsers, "xtcp+xudp"); err != nil {

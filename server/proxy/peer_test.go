@@ -18,7 +18,18 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	v1 "github.com/fatedier/frp/pkg/config/v1"
 )
+
+// newBaseProxyForPeerTest is the least a BaseProxy needs for the counting path:
+// a name and a configurer, which is all trackPeers and openUserConn read.
+func newBaseProxyForPeerTest(proxyType string) *BaseProxy {
+	return &BaseProxy{
+		name:       "peer-test",
+		configurer: &v1.TCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: "peer-test", Type: proxyType}},
+	}
+}
 
 func newCountingPeerTracker() (*peerTracker, *int64) {
 	var open int64
@@ -139,5 +150,53 @@ func TestPeerIP(t *testing.T) {
 		if got := peerIP(addr); got != want {
 			t.Fatalf("peerIP(%q) = %q, want %q", addr, got, want)
 		}
+	}
+}
+
+// The merged proxy types must all track peers, not connections. The bug this
+// pins: xtcp+xudp and stcp+sudp carry both transports as separate streams over
+// one visitor listener, and without a tracker a remote desktop session - which
+// takes the tcp and udp halves at once - was reported as two or three
+// connections instead of the one visitor it is.
+//
+// Checked by constructing each proxy's zero value and running its tracker
+// setup, rather than by standing up listeners: what regressed was the wiring,
+// and the wiring is what this reads.
+func TestMergedProxyTypesTrackPeers(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*BaseProxy)
+	}{
+		{"tcp+udp", func(b *BaseProxy) { b.trackPeers() }},
+		{"stcp+sudp", func(b *BaseProxy) { b.trackPeers() }},
+		{"xtcp+xudp", func(b *BaseProxy) { b.trackPeers() }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := newBaseProxyForPeerTest(tc.name)
+			tc.setup(base)
+
+			if base.peers == nil {
+				t.Fatal("no peer tracker installed, so each stream would count on its own")
+			}
+
+			// One visitor, both halves, plus an extra stream: still one.
+			closes := []func(){
+				base.openUserConn("10.0.0.1:51000"),
+				base.openUserConn("10.0.0.1:51001"),
+				base.openUserConn("10.0.0.1:51002"),
+			}
+			if got := len(base.peers.refs); got != 1 {
+				t.Fatalf("tracking %d peers, want 1", got)
+			}
+
+			for _, c := range closes {
+				c()
+			}
+			if got := len(base.peers.refs); got != 0 {
+				t.Fatalf("%d peers left after every stream closed", got)
+			}
+		})
 	}
 }

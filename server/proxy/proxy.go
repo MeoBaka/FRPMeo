@@ -136,9 +136,9 @@ type BaseProxy struct {
 
 	// peers, when set, makes this proxy report distinct peer IPs rather than
 
-	// individual connections. Set by proxy types whose halves serve the same
+	// individual connections. Set by the merged proxy types, whose two halves
 
-	// peer over two transports (tcp+udp).
+	// serve the same peer: tcp+udp, stcp+sudp and xtcp+xudp. See trackPeers.
 
 	peers *peerTracker
 
@@ -882,6 +882,27 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 	}
 
 	xl.Debugf("join connections closed")
+}
+
+// trackPeers makes this proxy report distinct peer IPs rather than individual
+// connections. Call it before the listeners start, since the handlers read
+// pxy.peers without synchronizing.
+//
+// For the merged proxy types, whose two transports reach one peer: tcp+udp
+// serves them on two listeners, and stcp+sudp and xtcp+xudp multiplex them as
+// tagged streams over the one visitor listener. Either way a peer that uses
+// both opens more than one thing to count, and counting each would report one
+// visitor as two or three - which is what remote desktop does, since it takes
+// the tcp and udp halves at once. See peerTracker.
+func (pxy *BaseProxy) trackPeers() {
+	name := pxy.GetName()
+
+	proxyType := pxy.configurer.GetBaseConfig().Type
+
+	pxy.peers = newPeerTracker(
+		func() { metrics.Server.OpenConnection(name, proxyType) },
+		func() { metrics.Server.CloseConnection(name, proxyType) },
+	)
 }
 
 // openUserConn reports a user connection as open and returns the function that

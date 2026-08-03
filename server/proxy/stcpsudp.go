@@ -65,6 +65,11 @@ func NewSTCPSUDPProxy(baseProxy *BaseProxy) Proxy {
 }
 
 func (pxy *STCPSUDPProxy) Run() (remoteAddr string, err error) {
+	// One visitor reaching both halves opens a tagged stream for each, so they
+	// share a tracker rather than being counted twice. Set before the listener
+	// starts accepting.
+	pxy.trackPeers()
+
 	err = pxy.startVisitorListener(pxy.cfg.Secretkey, pxy.cfg.AllowUsers, "stcp+sudp")
 
 	return

@@ -97,12 +97,7 @@ func (pxy *TCPUDPProxy) Run() (remoteAddr string, err error) {
 
 	// Both halves serve the same peers, so they share one tracker: an IP that
 	// uses tcp and udp is one connection in the stats, not two.
-	name := pxy.GetName()
-	proxyType := pxy.GetConfigurer().GetBaseConfig().Type
-	pxy.peers = newPeerTracker(
-		func() { metrics.Server.OpenConnection(name, proxyType) },
-		func() { metrics.Server.CloseConnection(name, proxyType) },
-	)
+	pxy.trackPeers()
 
 	// --- TCP listener ---
 	listener, errRet := net.Listen("tcp", net.JoinHostPort(pxy.serverCfg.ProxyBindAddr, strconv.Itoa(pxy.realBindPort)))
