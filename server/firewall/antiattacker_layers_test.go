@@ -426,3 +426,95 @@ func TestBanningGate(t *testing.T) {
 		t.Error("switching the attack detector off also disabled banning")
 	}
 }
+
+// --- the suspect tier ---
+
+// A source with strikes short of a ban used to be measured exactly like a
+// source with a clean record: the evidence sat in the ledger unused until the
+// last strike landed. It now buys a tighter budget instead.
+func TestStrikesShortOfABanHalveTheBudget(t *testing.T) {
+	aa := AntiAttackerConfig{
+		Enabled: true,
+		Control: ControlProfile{Protect: true, RateProfile: RateProfile{
+			WindowMs: 60000, MaxPerWindow: 4, BanViolations: 99,
+		}},
+		Strikes: StrikeConfig{Enabled: true, ProtocolFailures: 3, BanSeconds: 60, ForgetMs: 300000, MaxTracked: 100},
+		Attack:  AttackConfig{Enabled: true, ConnectionsPerSec: 1, CooldownSec: 60},
+	}
+
+	// Clean record: the full allowance of four.
+	clean := newAAFirewall(t, aa)
+	for i := range 4 {
+		if !clean.AdmitControl("1.2.3.4:1000").Allowed {
+			t.Fatalf("a clean source was refused on attempt %d of 4", i+1)
+		}
+	}
+	if clean.AdmitControl("1.2.3.4:1000").Allowed {
+		t.Fatal("the fifth attempt was allowed past a limit of four")
+	}
+
+	// One failed protocol attempt - not enough to ban - and the same source
+	// gets half.
+	marked := newAAFirewall(t, aa)
+	marked.ReportProtocolFailure("1.2.3.4:1000")
+
+	for i := range 2 {
+		if !marked.AdmitControl("1.2.3.4:1000").Allowed {
+			t.Fatalf("a suspect source was refused on attempt %d of 2", i+1)
+		}
+	}
+	if marked.AdmitControl("1.2.3.4:1000").Allowed {
+		t.Fatal("a source with a strike against it still got the full allowance")
+	}
+}
+
+// Trust outranks the ledger: a source that has proved itself is not measured at
+// all, whatever it did before.
+func TestTrustedSourceIsNotHalved(t *testing.T) {
+	f := newAAFirewall(t, AntiAttackerConfig{
+		Enabled: true,
+		Control: ControlProfile{Protect: true, RateProfile: RateProfile{
+			WindowMs: 60000, MaxPerWindow: 2, BanViolations: 99,
+		}},
+		Strikes: StrikeConfig{Enabled: true, ProtocolFailures: 3, BanSeconds: 60, ForgetMs: 300000, MaxTracked: 100},
+	})
+	cfg := f.Snapshot()
+	cfg.Rules = []Rule{{ID: "office", Action: "allow", CIDR: "1.2.3.4", Port: "all", Trusted: true}}
+	if err := f.SetConfig(cfg); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+	f.ReportProtocolFailure("1.2.3.4:1000")
+
+	for range 20 {
+		if !f.AdmitControl("1.2.3.4:1000").Allowed {
+			t.Fatal("a trusted source was measured because it had a strike")
+		}
+	}
+}
+
+func TestHalvedRoundsUpAndLeavesTheWideTiersAlone(t *testing.T) {
+	p := RateProfile{
+		MaxPerWindow: 5, BanViolations: 3,
+		SubnetMaxPerWindow: 10, GlobalMaxPerWindow: 100,
+	}
+	h := halved(p)
+
+	if h.MaxPerWindow != 3 {
+		t.Errorf("MaxPerWindow = %d, want 3 - halving must round up so a limit of 1 never becomes 0", h.MaxPerWindow)
+	}
+	if h.BanViolations != 2 {
+		t.Errorf("BanViolations = %d, want 2", h.BanViolations)
+	}
+	if h.SubnetMaxPerWindow != 10 || h.GlobalMaxPerWindow != 100 {
+		t.Error("the wider tiers were halved; they count everyone together, so one suspect would throttle its neighbors")
+	}
+
+	// A limit of one has nowhere to go and must stay usable.
+	if got := halved(RateProfile{MaxPerWindow: 1, BanViolations: 1}); got.MaxPerWindow != 1 || got.BanViolations != 1 {
+		t.Errorf("halving a limit of one gave %+v, want it left alone", got)
+	}
+	// The never-ban sentinel must survive, or the wide tiers would start banning.
+	if got := halved(RateProfile{BanViolations: maxInt}); got.BanViolations != maxInt {
+		t.Error("halving turned the never-ban sentinel into a reachable count")
+	}
+}

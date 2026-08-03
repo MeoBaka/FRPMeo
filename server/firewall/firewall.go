@@ -897,6 +897,20 @@ func (f *Firewall) exempt(key string, c AntiAttackerConfig) (skip bool, refuse b
 	return false, false
 }
 
+// profileFor applies the strike ledger's opinion of key to a rate profile.
+//
+// Three tiers on one code path, in order of what the source has shown us: a
+// trusted rule or earned trust skips the counters entirely, a clean record is
+// measured as configured, and a source with strikes short of a ban gets half
+// the budget. The middle of the ledger used to mean nothing at all - the
+// evidence sat there unused until the last strike landed.
+func (f *Firewall) profileFor(p RateProfile, key string, c AntiAttackerConfig) RateProfile {
+	if f.strikes.suspect(key, c.Strikes) {
+		return halved(p)
+	}
+	return p
+}
+
 // trustedSource reports whether an allow rule marked trusted names ip.
 //
 // The port is not consulted, unlike everywhere else rules are matched. What
@@ -1090,7 +1104,7 @@ func (f *Firewall) AdmitTCP(remoteAddr string) Verdict {
 	} else if refuse {
 		return verdictStruck
 	}
-	return f.tcpLimiter.admitBoth(key, c.TCP, f.banning(c))
+	return f.tcpLimiter.admitBoth(key, f.profileFor(c.TCP, key, c), f.banning(c))
 }
 
 // AdmitHTTP rate-limits one request served by the vhost reverse proxy. xff is
@@ -1114,7 +1128,7 @@ func (f *Firewall) AdmitHTTP(remoteAddr, xff string) Verdict {
 	} else if refuse {
 		return verdictStruck
 	}
-	return f.httpLimiter.admitBoth(key, c.HTTP.RateProfile, f.banning(c))
+	return f.httpLimiter.admitBoth(key, f.profileFor(c.HTTP.RateProfile, key, c), f.banning(c))
 }
 
 // AdmitControl rate-limits one connection to the frps control port, after
@@ -1141,7 +1155,7 @@ func (f *Firewall) AdmitControl(remoteAddr string) Verdict {
 	} else if refuse {
 		return verdictStruck
 	}
-	return f.ctlLimiter.admitBoth(key, c.Control.RateProfile, f.banning(c))
+	return f.ctlLimiter.admitBoth(key, f.profileFor(c.Control.RateProfile, key, c), f.banning(c))
 }
 
 // AdmitWeb rate-limits one connection to the dashboard port, after AllowWeb has
@@ -1166,7 +1180,7 @@ func (f *Firewall) AdmitWeb(remoteAddr string) Verdict {
 	} else if refuse {
 		return verdictStruck
 	}
-	return f.webLimiter.admitBoth(key, c.Web.RateProfile, f.banning(c))
+	return f.webLimiter.admitBoth(key, f.profileFor(c.Web.RateProfile, key, c), f.banning(c))
 }
 
 // AdmitSSH rate-limits one connection to the ssh tunnel gateway port, after
@@ -1187,7 +1201,7 @@ func (f *Firewall) AdmitSSH(remoteAddr string) Verdict {
 	} else if refuse {
 		return verdictStruck
 	}
-	return f.sshLimiter.admitBoth(key, c.SSH.RateProfile, f.banning(c))
+	return f.sshLimiter.admitBoth(key, f.profileFor(c.SSH.RateProfile, key, c), f.banning(c))
 }
 
 // AdmitUDP rate-limits one UDP packet of size bytes, for the udp and pe proxies

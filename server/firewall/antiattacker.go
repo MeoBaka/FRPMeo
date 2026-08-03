@@ -979,6 +979,38 @@ func (s *strikeStore) banned(key string, c StrikeConfig) bool {
 	return e != nil && e.bannedUntil > now
 }
 
+// suspect reports whether key has strikes against it without having reached a
+// ban.
+//
+// The middle of the ledger used to mean nothing: a source could fail the
+// protocol twice out of three, or connect and carry nothing four times out of
+// five, and be measured exactly like a source with a clean record. The evidence
+// was there and went unused until the last strike landed.
+//
+// It is deliberately not a ban of its own. What it earns is a tighter budget -
+// see halved - which turns a partial record into an earlier refusal rather than
+// into a verdict the evidence does not yet support.
+func (s *strikeStore) suspect(key string, c StrikeConfig) bool {
+	if !c.Enabled || key == "" {
+		return false
+	}
+	now := s.nowMs()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e := s.entries[key]
+	if e == nil || e.bannedUntil > now {
+		return false
+	}
+	// A record old enough to be forgotten is not held against anyone; add would
+	// have cleared it on the next strike anyway.
+	if e.lastSeen != 0 && now-e.lastSeen > int64(c.ForgetMs) {
+		return false
+	}
+	return e.protocol > 0 || e.empty > 0
+}
+
 func (s *strikeStore) pruneLocked(now int64, forgetMs int) {
 	for k, e := range s.entries {
 		if e.bannedUntil > now {
@@ -1094,6 +1126,27 @@ func (l *limiter) admitBoth(key string, p RateProfile, banning bool) Verdict {
 }
 
 const maxInt = int(^uint(0) >> 1)
+
+// halved returns p with the per-source allowance and the violation count both
+// cut in half, for a source the strike ledger has something on.
+//
+// Half rather than a ban, because that is what the evidence supports: a couple
+// of failed protocol attempts say "watch this one", not "this one is an
+// attack". It reaches the same ban sooner from both directions - fewer
+// connections per window, fewer windows before the count is met - while a
+// source that was simply having a bad minute still gets through.
+//
+// The wider tiers are left alone. They count everyone together, so halving them
+// for one suspect source would throttle every neighbor it has.
+func halved(p RateProfile) RateProfile {
+	if p.MaxPerWindow > 1 {
+		p.MaxPerWindow = (p.MaxPerWindow + 1) / 2
+	}
+	if p.BanViolations > 1 && p.BanViolations != maxInt {
+		p.BanViolations = (p.BanViolations + 1) / 2
+	}
+	return p
+}
 
 // subnetKey maps a source key to the block it shares with its neighbors: /24
 // for IPv4, /48 for IPv6. Returns "" when the key is not an address, which

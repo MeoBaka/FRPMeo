@@ -314,6 +314,14 @@
           <el-input v-model.number="snap.antiAttacker.strikes.banSeconds" type="number" class="w90" />
           <el-button @click="save" :loading="saving">Save</el-button>
         </div>
+        <p class="hint" v-if="snap.antiAttacker.strikes.enabled">
+          Strikes short of a ban are not free either: a source with something in
+          the ledger gets half the per-source allowance and reaches a ban in half
+          the violations, on every rate profile. That middle ground used to mean
+          nothing - a peer could fail twice out of three and still be measured
+          like one with a clean record. Trust outranks it, so a source that has
+          proved itself is not measured at all whatever it did before.
+        </p>
 
         <el-divider content-position="left">Trust - stop measuring people who already behaved</el-divider>
         <div class="bar">
@@ -354,8 +362,27 @@
           <el-input v-model.number="snap.antiAttacker.attack.cooldownSec" type="number" class="w90" />
           <label class="lbl">Handshake timeout (ms)</label>
           <el-input v-model.number="snap.antiAttacker.attack.initialTimeoutMs" type="number" class="w120" placeholder="0 = leave alone" />
+          <label class="lbl">Handshake byte cap</label>
+          <el-input v-model.number="snap.antiAttacker.attack.initialBufferLimitBytes" type="number" class="w120" placeholder="0 = off" />
           <el-button @click="save" :loading="saving">Save</el-button>
         </div>
+        <p class="hint" v-if="snap.antiAttacker.attack.enabled">
+          The byte cap is how much a peer may send before it has identified
+          itself. The timeout above catches the peer that says nothing; this
+          catches the opposite one, which says far too much - and the connection
+          counters see neither, because one connection is one connection however
+          many megabytes it carries. Unlike the timeout it stays armed whether or
+          not an attack is under way: 64 KiB is two orders of magnitude above a
+          large TLS ClientHello, so it never argues with a real client.
+        </p>
+
+        <p class="hint" style="margin-top:12px" v-if="snap.antiAttacker.attack.enabled">
+          Bans are only handed out while this state is on. A quiet server
+          throttles a source that overflows its window but does not lock it out -
+          the violations still accumulate, so a source that carries on into an
+          attack is banned on the first overflow. With this switch off there is
+          no state to consult and bans escalate as they otherwise would.
+        </p>
 
         <el-divider content-position="left">Startup grace</el-divider>
         <div class="bar">
@@ -613,7 +640,7 @@ interface AntiAttacker {
   // spend another's.
   control: ControlProfile; web: ControlProfile; ssh: ControlProfile
   graceSeconds: number
-  attack: { enabled: boolean; connectionsPerSec: number; cooldownSec: number; initialTimeoutMs: number }
+  attack: { enabled: boolean; connectionsPerSec: number; cooldownSec: number; initialTimeoutMs: number; initialBufferLimitBytes: number }
   trust: { enabled: boolean; afterMs: number; minBytes: number; forSeconds: number; maxTracked: number }
   strikes: {
     enabled: boolean; protocolFailures: number; emptyConnections: number
@@ -663,7 +690,7 @@ function defAntiAttacker(): AntiAttacker {
     graceSeconds: 60,
     // Off by default, every one of them: each costs something when wrong, and
     // none should start acting because somebody flipped the master switch.
-    attack: { enabled: false, connectionsPerSec: 40, cooldownSec: 60, initialTimeoutMs: 2000 },
+    attack: { enabled: false, connectionsPerSec: 40, cooldownSec: 60, initialTimeoutMs: 2000, initialBufferLimitBytes: 65536 },
     trust: { enabled: false, afterMs: 300000, minBytes: 4096, forSeconds: 86400, maxTracked: 65536 },
     strikes: { enabled: false, protocolFailures: 3, emptyConnections: 6, emptyBytes: 64, banSeconds: 600, forgetMs: 3600000, maxTracked: 65536 },
     ssh: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 10, banViolations: 3, banSeconds: 300, idleForgetMs: 60000, maxTracked: 65536, subnetMaxPerWindow: 0, globalMaxPerWindow: 0, maxConcurrent: 0 },
