@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fatedier/golib/crypto"
@@ -147,7 +148,9 @@ func setServiceOptionsDefault(options *ServiceOptions) error {
 
 type Service struct {
 	ctlMu sync.RWMutex
-
+	// Stores gracefulShutdownDuration independently from ctlMu, because the
+	// graceful shutdown wait may hold ctlMu for an arbitrary duration.
+	gracefulShutdownDuration atomic.Int64
 	// manager control connection with server
 
 	ctl *Control
@@ -221,10 +224,7 @@ type Service struct {
 	ctx context.Context
 
 	// call cancel to stop service
-
 	cancel context.CancelCauseFunc
-
-	gracefulShutdownDuration time.Duration
 
 	connectorCreator func(context.Context, *v1.ClientCommonConfig) Connector
 
@@ -639,8 +639,7 @@ func (svr *Service) Close() {
 }
 
 func (svr *Service) GracefulClose(d time.Duration) {
-	svr.gracefulShutdownDuration = d
-
+	svr.gracefulShutdownDuration.Store(int64(d))
 	svr.cancel(nil)
 }
 
@@ -664,9 +663,8 @@ func (svr *Service) stop() {
 	defer svr.ctlMu.Unlock()
 
 	if svr.ctl != nil {
-
-		svr.ctl.GracefulClose(svr.gracefulShutdownDuration)
-
+		d := time.Duration(svr.gracefulShutdownDuration.Load())
+		svr.ctl.GracefulClose(d)
 		svr.ctl = nil
 
 	}

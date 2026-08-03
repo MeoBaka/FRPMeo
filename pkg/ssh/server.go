@@ -28,7 +28,6 @@ package ssh
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -66,6 +65,11 @@ type tcpipForward struct {
 	Host string
 
 	Port uint32
+}
+
+// https://datatracker.ietf.org/doc/html/rfc4254#section-6.5
+type execPayload struct {
+	Command string
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4254#page-16
@@ -457,19 +461,13 @@ func (s *TunnelServer) handleNewChannel(channel ssh.NewChannel, extraPayloadCh c
 		if req.WantReply {
 			_ = req.Reply(true, nil)
 		}
-
-		if req.Type != "exec" || len(req.Payload) <= 4 {
+		if req.Type != "exec" {
 			continue
 		}
-
-		end := 4 + binary.BigEndian.Uint32(req.Payload[:4])
-
-		if len(req.Payload) < int(end) {
+		extraPayload, ok := parseExecPayload(req.Payload)
+		if !ok {
 			continue
 		}
-
-		extraPayload := string(req.Payload[4:end])
-
 		select {
 
 		case extraPayloadCh <- extraPayload:
@@ -479,6 +477,14 @@ func (s *TunnelServer) handleNewChannel(channel ssh.NewChannel, extraPayloadCh c
 		}
 
 	}
+}
+
+func parseExecPayload(payload []byte) (string, bool) {
+	var msg execPayload
+	if err := ssh.Unmarshal(payload, &msg); err != nil {
+		return "", false
+	}
+	return msg.Command, true
 }
 
 func (s *TunnelServer) keepAlive(ch ssh.Channel) {
