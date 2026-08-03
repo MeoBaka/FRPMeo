@@ -1133,6 +1133,36 @@ type Options struct {
 	WireProtocol string
 }
 
+// serverSideBandwidth is how fast frps will let this proxy move data, in bytes
+// per second, or 0 for no ceiling.
+//
+// Two numbers decide it, and only one of them can be trusted. The proxy's
+// transport.bandwidthLimit comes from the client's own config: frps enforces it
+// when the client asks for "server" mode, but a client that asks for nothing,
+// picks "client" mode, or writes a gigabyte a second is choosing its own limit.
+// serverCfg.maxBandwidthPerProxy is the operator's, and no client can raise it.
+//
+// So the client's request is honored when it made one, never above the
+// operator's ceiling, and the ceiling still applies when it made none.
+func serverSideBandwidth(configurer v1.ProxyConfigurer, serverCfg *v1.ServerConfig) int64 {
+	base := configurer.GetBaseConfig()
+
+	requested := int64(0)
+	if base.Transport.BandwidthLimitMode == types.BandwidthLimitModeServer {
+		requested = base.Transport.BandwidthLimit.Bytes()
+	}
+
+	ceiling := int64(0)
+	if serverCfg != nil {
+		ceiling = serverCfg.MaxBandwidthPerProxy.Bytes()
+	}
+
+	if ceiling > 0 && (requested <= 0 || ceiling < requested) {
+		return ceiling
+	}
+	return requested
+}
+
 func NewProxy(ctx context.Context, options *Options) (pxy Proxy, err error) {
 	configurer := options.Configurer
 
@@ -1140,10 +1170,8 @@ func NewProxy(ctx context.Context, options *Options) (pxy Proxy, err error) {
 
 	var limiter *rate.Limiter
 
-	limitBytes := configurer.GetBaseConfig().Transport.BandwidthLimit.Bytes()
-
-	if limitBytes > 0 && configurer.GetBaseConfig().Transport.BandwidthLimitMode == types.BandwidthLimitModeServer {
-		limiter = rate.NewLimiter(rate.Limit(float64(limitBytes)), int(limitBytes))
+	if b := serverSideBandwidth(configurer, options.ServerCfg); b > 0 {
+		limiter = rate.NewLimiter(rate.Limit(float64(b)), int(b))
 	}
 
 	basePxy := BaseProxy{

@@ -179,3 +179,64 @@ func TestStartVisitorListenerMarksProxyAuthenticated(t *testing.T) {
 func TestPlainProxyIsNotVisitorAuthenticated(t *testing.T) {
 	require.False(t, (&BaseProxy{}).visitorAuthenticated)
 }
+
+// --- the server-side bandwidth ceiling ---
+
+// transport.bandwidthLimit is a number the client writes in its own config, so
+// on its own it is the client choosing what frps will enforce against it.
+// maxBandwidthPerProxy is the operator's, and no client can raise it.
+func TestServerSideBandwidth(t *testing.T) {
+	const mb = 1024 * 1024
+
+	proxyCfg := func(limit string, mode string) v1.ProxyConfigurer {
+		c := &v1.TCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: "p", Type: "tcp"}}
+		if limit != "" {
+			require.NoError(t, c.Transport.BandwidthLimit.UnmarshalString(limit))
+		}
+		c.Transport.BandwidthLimitMode = mode
+		return c
+	}
+	serverCfg := func(ceiling string) *v1.ServerConfig {
+		s := &v1.ServerConfig{}
+		if ceiling != "" {
+			require.NoError(t, s.MaxBandwidthPerProxy.UnmarshalString(ceiling))
+		}
+		return s
+	}
+
+	cases := []struct {
+		name  string
+		limit string
+		mode  string
+		max   string
+		want  int64
+	}{
+		{"nothing configured anywhere", "", "", "", 0},
+		{"client asks for server mode, no ceiling", "10MB", "server", "", 10 * mb},
+		{"client mode is the client's business, no ceiling", "10MB", "client", "", 0},
+
+		// The ceiling applies however the client configured itself, including
+		// when it configured nothing at all.
+		{"ceiling with no client limit", "", "", "5MB", 5 * mb},
+		{"ceiling with client mode", "10MB", "client", "5MB", 5 * mb},
+		{"ceiling cuts an over-asking client down", "100MB", "server", "5MB", 5 * mb},
+
+		// And a client asking for less than the ceiling still gets what it
+		// asked for - the ceiling is a maximum, not a quota.
+		{"client asks for less than the ceiling", "1MB", "server", "5MB", 1 * mb},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := serverSideBandwidth(proxyCfg(tc.limit, tc.mode), serverCfg(tc.max))
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// A nil server config must not panic: proxies are built in tests and tools that
+// do not always supply one.
+func TestServerSideBandwidthWithoutAServerConfig(t *testing.T) {
+	c := &v1.TCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: "p", Type: "tcp"}}
+	require.Equal(t, int64(0), serverSideBandwidth(c, nil))
+}

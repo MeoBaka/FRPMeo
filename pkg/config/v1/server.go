@@ -146,6 +146,26 @@ type ServerConfig struct {
 
 	MaxPortsPerClient int64 `json:"maxPortsPerClient,omitempty"`
 
+	// MaxBandwidthPerProxy caps how fast any one proxy may move data through
+
+	// frps. Zero, the default, applies no ceiling.
+
+	//
+
+	// Distinct from the proxy's own transport.bandwidthLimit, which is a
+
+	// number the client puts in its own config: even in "server" mode frps
+
+	// only enforces what the client asked for, so a client that asks for
+
+	// nothing, or asks for a gigabyte a second, gets it. This is the frps-side
+
+	// maximum that no client can raise, and it applies whether or not the
+
+	// client set a limit of its own.
+
+	MaxBandwidthPerProxy types.BandwidthQuantity `json:"maxBandwidthPerProxy,omitempty"`
+
 	// UserConnTimeout specifies the maximum time to wait for a work
 
 	// connection. By default, this value is 10.
