@@ -147,8 +147,23 @@
             <el-tag :type="row.action === 'allow' ? 'success' : 'danger'" disable-transitions>{{ row.action }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="CIDR / IP" min-width="130"><template #default="{ row }">{{ row.cidr || 'any' }}</template></el-table-column>
-        <el-table-column label="Port" min-width="120"><template #default="{ row }">{{ row.port || 'all' }}</template></el-table-column>
+        <el-table-column label="Source" min-width="200">
+          <template #default="{ row }">
+            <div>{{ row.cidr || 'any' }}</div>
+            <div v-if="domainOf(row)" class="hint" style="margin:2px 0 0">
+              <span v-if="domainOf(row)!.addresses?.length">-> {{ domainOf(row)!.addresses!.join(', ') }}</span>
+              <span v-else>not resolved yet</span>
+              <el-tag v-if="domainOf(row)!.error" type="warning" size="small" style="margin-left:6px" :title="domainOf(row)!.error">lookup failing</el-tag>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="Port" min-width="110"><template #default="{ row }">{{ row.port || 'all' }}</template></el-table-column>
+        <el-table-column label="Trusted" width="90">
+          <template #default="{ row }">
+            <el-tag v-if="row.trusted && row.action === 'allow'" type="success" size="small" disable-transitions>trusted</el-tag>
+            <span v-else class="hint">-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="Expires" min-width="110"><template #default="{ row }">{{ expiryText(row.expiresAt) }}</template></el-table-column>
         <el-table-column label="Note" prop="note" min-width="120" />
         <el-table-column label="" width="170" align="right">
@@ -193,31 +208,10 @@
       </p>
 
       <template v-if="snap.antiAttacker.enabled">
-        <div class="fg-inline" style="margin-top:12px">
-          <label>Apply to</label>
-          <el-select v-model="snap.antiAttacker.scope" class="w220" @change="save">
-            <el-option label="All proxies" value="all" />
-            <el-option label="Selected proxies" value="selected" />
-          </el-select>
-          <span class="hint">
-            Named per proxy rather than per port because http / https proxies all
-            answer on the shared vhost port, so a port cannot tell them apart.
-          </span>
-        </div>
-
-        <div class="fg-inline" style="margin-top:12px" v-if="snap.antiAttacker.scope === 'selected'">
-          <label>Proxies</label>
-          <el-input
-            v-model="proxiesText"
-            type="textarea"
-            :rows="3"
-            placeholder="user/name per line, or just name for proxies with no user&#10;bob/web&#10;ssh"
-          />
-          <span class="hint">
-            Matched on user + name: proxy names are only unique within a user, so
-            a bare name never picks up another tenant's proxy.
-          </span>
-        </div>
+        <p class="hint" style="margin-top:12px">
+          Applies to every proxy. Which sources are exempt is a rules question,
+          not a second list here: add an allow rule and tick Trusted.
+        </p>
 
         <el-divider content-position="left">TCP - counted per connection</el-divider>
         <div class="bar">
@@ -286,23 +280,16 @@
           <el-input v-model.number="snap.antiAttacker.http.subnetMaxPerWindow" type="number" class="w90" placeholder="0 = off" />
           <el-button @click="save" :loading="saving">Save</el-button>
         </div>
-        <div class="fg-inline" style="margin-top:12px" v-if="snap.antiAttacker.http.enabled">
-          <label>Trusted proxies</label>
-          <el-input
-            v-model="trustedText"
-            type="textarea"
-            :rows="2"
-            placeholder="One IP or CIDR per line, e.g. 10.0.0.0/8 - leave blank to ignore X-Forwarded-For"
-          />
-          <span class="hint">
-            Only these peers' X-Forwarded-For is believed. Left blank the socket
-            address is counted instead. Trusting the header without this list
-            does not weaken the limit, it removes it: the value is written by
-            whoever is calling, so an attacker is never the same source twice.
-            Behind a CDN, leaving it blank means every visitor counts as one
-            source - raise the limit accordingly.
-          </span>
-        </div>
+        <p class="hint" style="margin-top:12px" v-if="snap.antiAttacker.http.enabled">
+          X-Forwarded-For is believed only from a peer covered by an allow rule
+          with Trusted ticked - add one naming your load balancer or CDN. From
+          anyone else the socket address is counted instead, which behind a CDN
+          means every visitor counts as one source, so raise the limit
+          accordingly. It is the Trusted tick rather than any allow rule because
+          believing the header from a peer you merely allow does not weaken the
+          limit, it removes it: the value is written by whoever is calling, so an
+          attacker is never the same source twice.
+        </p>
 
 
         <el-divider content-position="left">Signals - not about volume</el-divider>
@@ -537,7 +524,26 @@
         <el-form-item label="Action">
           <el-select v-model="dialog.rule.action"><el-option label="allow" value="allow" /><el-option label="deny" value="deny" /></el-select>
         </el-form-item>
-        <el-form-item label="CIDR / IP"><el-input v-model="dialog.rule.cidr" placeholder="1.2.3.0/24, ::1, 1.2.3.4 (blank=any)" /></el-form-item>
+        <el-form-item label="Source">
+          <el-input v-model="dialog.rule.cidr" placeholder="1.2.3.0/24, ::1, 1.2.3.4, office.example.com (blank=any)" />
+          <div class="hint" style="margin-top:4px">
+            An address, a CIDR block, or a domain name. A domain is resolved in
+            the background and looked up again on an interval, so a rule can
+            name a connection whose address moves - a home line on dynamic DNS,
+            say - and keep meaning the same thing. It works either way round:
+            allow follows the name in, deny follows it out.
+          </div>
+        </el-form-item>
+        <el-form-item v-if="dialog.rule.action === 'allow'" label="Trusted">
+          <el-switch v-model="dialog.rule.trusted" />
+          <div class="hint" style="margin-top:4px">
+            Off by default. On, a source this rule matches is also exempt from
+            the rate limits, the bans and the reputation provider - not just
+            from the rules. Turn it on for the addresses you cannot afford to
+            have locked out by a counter, and keep the list short: it does turn
+            every other layer off for them.
+          </div>
+        </el-form-item>
         <el-form-item label="Port">
           <el-input v-model="dialog.rule.port" placeholder="all" />
           <div class="hint" style="margin-top:4px">
@@ -567,7 +573,10 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { http } from '../api/http'
 
-interface Rule { id?: string; action: string; cidr: string; port: string; note: string; expiresAt?: number }
+// cidr is an address, a CIDR block or a domain name. trusted only means
+// anything on an allow rule: it exempts the source from the rate limits, the
+// bans and the reputation provider as well as from the rules.
+interface Rule { id?: string; action: string; cidr: string; port: string; trusted?: boolean; note: string; expiresAt?: number }
 interface Provider {
   mode: string
   frpControlURL: string; frpControlAPIKey: string
@@ -584,7 +593,7 @@ interface RateProfile {
   globalMaxPerWindow: number
   maxConcurrent: number
 }
-interface HTTPProfile extends RateProfile { trustedProxies: string[]; retryAfterSec: number }
+interface HTTPProfile extends RateProfile { retryAfterSec: number }
 // UDP is its own shape: two dimensions, a global tier, and no ban - a forged
 // source address makes banning a weapon rather than a defence.
 interface UDPProfile {
@@ -598,7 +607,7 @@ interface UDPProfile {
 // must never start refusing the frpc clients that keep the tunnels up.
 interface ControlProfile extends RateProfile { protect: boolean }
 interface AntiAttacker {
-  enabled: boolean; scope: string; proxies: string[]
+  enabled: boolean
   tcp: RateProfile; http: HTTPProfile; udp: UDPProfile
   // Three separate doors into frps, three budgets: hammering one must not
   // spend another's.
@@ -611,6 +620,15 @@ interface AntiAttacker {
     emptyBytes: number; banSeconds: number; forgetMs: number; maxTracked: number
   }
 }
+// What a rule's domain currently resolves to. A name that stopped resolving is
+// still matching its old addresses, which has to be visible.
+interface DomainStatus {
+  domain: string
+  addresses?: string[]
+  resolvedSecondsAgo?: number
+  error?: string
+}
+
 interface BanEntry { source: string; tier: string; reason: string; secondsLeft: number }
 interface FwStatus {
   underAttack: boolean; inGrace: boolean
@@ -618,7 +636,7 @@ interface FwStatus {
 }
 interface Snap {
   enabled: boolean; controlPort: boolean; webPort: boolean; default: string
-  rules: Rule[]; provider: Provider; antiAttacker: AntiAttacker
+  rules: Rule[]; provider: Provider; antiAttacker: AntiAttacker; domainRefreshSec: number
 }
 
 function defProvider(): Provider {
@@ -630,12 +648,10 @@ function defProvider(): Provider {
 function defAntiAttacker(): AntiAttacker {
   return {
     enabled: false,
-    scope: 'all',
-    proxies: [],
     // Both profiles ship enabled so that turning the feature on does something.
     // The master switch above is what keeps it off until asked for.
     tcp: { enabled: true, windowMs: 5000, maxPerWindow: 4, banViolations: 3, banSeconds: 60, idleForgetMs: 40000, maxTracked: 65536, subnetMaxPerWindow: 0, globalMaxPerWindow: 0, maxConcurrent: 0 },
-    http: { enabled: true, windowMs: 10000, maxPerWindow: 120, banViolations: 5, banSeconds: 120, idleForgetMs: 60000, maxTracked: 65536, subnetMaxPerWindow: 0, globalMaxPerWindow: 0, maxConcurrent: 0, trustedProxies: [], retryAfterSec: 0 },
+    http: { enabled: true, windowMs: 10000, maxPerWindow: 120, banViolations: 5, banSeconds: 120, idleForgetMs: 60000, maxTracked: 65536, subnetMaxPerWindow: 0, globalMaxPerWindow: 0, maxConcurrent: 0, retryAfterSec: 0 },
     // Per-source rates from XCord's during-login anti-ddos settings. The global
     // ceilings stay at zero: no default can guess a host's capacity.
     udp: { enabled: true, windowMs: 1000, maxPacketsPerWindow: 500, maxBytesPerWindow: 50000, globalMaxPacketsPerWindow: 0, globalMaxBytesPerWindow: 0, idleForgetMs: 30000, maxTracked: 65536 },
@@ -652,11 +668,6 @@ function defAntiAttacker(): AntiAttacker {
     strikes: { enabled: false, protocolFailures: 3, emptyConnections: 6, emptyBytes: 64, banSeconds: 600, forgetMs: 3600000, maxTracked: 65536 },
     ssh: { protect: false, enabled: true, windowMs: 5000, maxPerWindow: 10, banViolations: 3, banSeconds: 300, idleForgetMs: 60000, maxTracked: 65536, subnetMaxPerWindow: 0, globalMaxPerWindow: 0, maxConcurrent: 0 },
   }
-}
-
-// One entry per line in the textarea, an array on the wire.
-function linesToList(t: string): string[] {
-  return t.split('\n').map((s) => s.trim()).filter(Boolean)
 }
 
 const loading = ref(false)
@@ -700,17 +711,28 @@ async function clearBans() {
     ElMessage.error('Failed: ' + (e.message || e))
   }
 }
-const snap = reactive<Snap>({ enabled: true, controlPort: false, webPort: false, default: 'allow', rules: [], provider: defProvider(), antiAttacker: defAntiAttacker() })
+const snap = reactive<Snap>({ enabled: true, controlPort: false, webPort: false, default: 'allow', rules: [], provider: defProvider(), antiAttacker: defAntiAttacker(), domainRefreshSec: 60 })
 
-const proxiesText = computed({
-  get: () => (snap.antiAttacker.proxies || []).join('\n'),
-  set: (t: string) => { snap.antiAttacker.proxies = linesToList(t) },
-})
+// What each domain named by a rule resolves to, keyed by name so the rules
+// table can show it under the rule that named it.
+const domainStatus = ref<DomainStatus[]>([])
 
-const trustedText = computed({
-  get: () => (snap.antiAttacker.http.trustedProxies || []).join('\n'),
-  set: (t: string) => { snap.antiAttacker.http.trustedProxies = linesToList(t) },
-})
+async function loadDomainStatus() {
+  try {
+    domainStatus.value = (await http.get<DomainStatus[]>('../api/firewall/domains')) || []
+  } catch {
+    // A diagnostic, not the page. The rules themselves are already shown.
+    domainStatus.value = []
+  }
+}
+
+// Empty for a rule whose source is an address or a block - there is nothing to
+// resolve and nothing to say.
+function domainOf(row: Rule): DomainStatus | undefined {
+  const t = (row.cidr || '').trim().toLowerCase().replace(/\.$/, '')
+  if (!t) return undefined
+  return domainStatus.value.find((d) => d.domain === t)
+}
 
 const headersText = computed({
   get: () => Object.entries(snap.provider.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n'),
@@ -761,14 +783,13 @@ async function load() {
     snap.provider = { ...defProvider(), ...(s.provider || {}) }
     if (!snap.provider.mode) snap.provider.mode = 'off'
     if (!snap.provider.headers) snap.provider.headers = {}
+    snap.domainRefreshSec = s.domainRefreshSec || 60
     const aaDef = defAntiAttacker()
     const aa = s.antiAttacker || ({} as AntiAttacker)
     snap.antiAttacker = {
       ...aaDef, ...aa,
-      scope: aa.scope || 'all',
-      proxies: aa.proxies || [],
       tcp: { ...aaDef.tcp, ...(aa.tcp || {}) },
-      http: { ...aaDef.http, ...(aa.http || {}), trustedProxies: aa.http?.trustedProxies || [] },
+      http: { ...aaDef.http, ...(aa.http || {}) },
       udp: { ...aaDef.udp, ...(aa.udp || {}) },
       control: { ...aaDef.control, ...(aa.control || {}) },
       web: { ...aaDef.web, ...(aa.web || {}) },
@@ -790,7 +811,7 @@ async function load() {
 async function persist(okMsg: string) {
   saving.value = true
   try {
-    await http.put('../api/firewall', { enabled: snap.enabled, controlPort: snap.controlPort, webPort: snap.webPort, default: snap.default, rules: snap.rules, provider: snap.provider, antiAttacker: snap.antiAttacker })
+    await http.put('../api/firewall', { enabled: snap.enabled, controlPort: snap.controlPort, webPort: snap.webPort, default: snap.default, rules: snap.rules, provider: snap.provider, antiAttacker: snap.antiAttacker, domainRefreshSec: snap.domainRefreshSec })
     ElMessage.success(okMsg)
     return true
   } catch (e: any) {
@@ -809,18 +830,21 @@ const save = () => persist('Saved')
 async function applyRules(okMsg: string, undo: Rule[]) {
   if (!(await persist(okMsg))) {
     snap.rules = undo
+    return
   }
+  // A rule change can add or drop a domain, so what they cover moves with it.
+  await loadDomainStatus()
 }
 
 function openAdd() {
   dialog.index = -1
-  dialog.rule = { action: 'deny', cidr: '', port: 'all', note: '' }
+  dialog.rule = { action: 'deny', cidr: '', port: 'all', trusted: false, note: '' }
   dialog.duration = '14'; dialog.days = 14
   dialog.open = true
 }
 function openEdit(i: number) {
   dialog.index = i
-  dialog.rule = { ...snap.rules[i], port: snap.rules[i].port || 'all' }
+  dialog.rule = { ...snap.rules[i], port: snap.rules[i].port || 'all', trusted: !!snap.rules[i].trusted }
   const exp = snap.rules[i].expiresAt
   dialog.duration = !exp ? 'perm' : 'custom'
   dialog.days = exp ? Math.max(1, Math.round((exp - Date.now() / 1000) / 86400)) : 14
@@ -830,6 +854,10 @@ async function applyDialog() {
   const r = { ...dialog.rule }
   // Blank means every port; say so, rather than leaving the rule looking unset.
   r.port = r.port.trim() || 'all'
+  // Trusted means nothing on a deny rule. Cleared rather than carried, so a
+  // rule switched from allow to deny does not keep a flag that would come back
+  // if it were switched again.
+  if (r.action !== 'allow') r.trusted = false
   if (dialog.duration === 'perm') r.expiresAt = 0
   else {
     const days = dialog.duration === '14' ? 14 : dialog.days || 1
@@ -870,6 +898,7 @@ onMounted(async () => {
   if (snap.antiAttacker.enabled) {
     await loadStatus()
   }
+  await loadDomainStatus()
 })
 </script>
 

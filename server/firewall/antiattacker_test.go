@@ -15,6 +15,7 @@
 package firewall
 
 import (
+	"net/netip"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -285,23 +286,28 @@ func TestConcurrentAdmitIsRaceFree(t *testing.T) {
 	}
 }
 
-func TestClientKeyIgnoresXFFWithoutTrustedList(t *testing.T) {
-	got := clientKey("9.9.9.9:1234", "1.2.3.4", nil)
-	if got != "9.9.9.9" {
-		t.Fatalf("clientKey = %q, want the socket address: an untrusted XFF must not be believed", got)
+func TestClientKeyIgnoresXFFFromAnUntrustedPeer(t *testing.T) {
+	for _, trusted := range []func(netip.Addr) bool{nil, trustNone} {
+		got := clientKey("9.9.9.9:1234", "1.2.3.4", trusted)
+		if got != "9.9.9.9" {
+			t.Fatalf("clientKey = %q, want the socket address: an untrusted XFF must not be believed", got)
+		}
 	}
 }
 
+// trustAll and trustNone stand in for the firewall's own "is this source
+// covered by a trusted allow rule" predicate.
+func trustAll(netip.Addr) bool  { return true }
+func trustNone(netip.Addr) bool { return false }
+
 func TestClientKeyUsesXFFFromTrustedProxy(t *testing.T) {
-	trusted := compileTrusted([]string{"9.9.9.0/24"})
-	if got := clientKey("9.9.9.9:1234", "1.2.3.4, 9.9.9.9", trusted); got != "1.2.3.4" {
+	if got := clientKey("9.9.9.9:1234", "1.2.3.4, 9.9.9.9", trustAll); got != "1.2.3.4" {
 		t.Fatalf("clientKey = %q, want the left-most XFF entry 1.2.3.4", got)
 	}
 }
 
 func TestClientKeyFallsBackOnBadXFF(t *testing.T) {
-	trusted := compileTrusted([]string{"9.9.9.9"})
-	if got := clientKey("9.9.9.9:1234", "not-an-ip", trusted); got != "9.9.9.9" {
+	if got := clientKey("9.9.9.9:1234", "not-an-ip", trustAll); got != "9.9.9.9" {
 		t.Fatalf("clientKey = %q, want the socket address when the header is unparseable", got)
 	}
 }
@@ -318,41 +324,11 @@ func TestClientKeyEmptyForUnparseablePeer(t *testing.T) {
 	}
 }
 
-func TestAppliesToScopeAll(t *testing.T) {
-	c := AntiAttackerConfig{Scope: "all"}.normalize()
-	if !c.appliesTo("bob", "web") {
-		t.Fatal(`scope "all" did not apply to a proxy`)
-	}
-}
-
-func TestAppliesToScopeSelected(t *testing.T) {
-	c := AntiAttackerConfig{Scope: "selected", Proxies: []string{"bob/web", "ssh"}}.normalize()
-
-	cases := []struct {
-		user, name string
-		want       bool
-	}{
-		{"bob", "web", true},
-		{"eve", "web", false}, // same name, different tenant
-		{"", "ssh", true},     // bare name, no user configured
-		{"bob", "ssh", false}, // bare entry must not match another user's proxy
-		{"", "web", false},
-	}
-	for _, tc := range cases {
-		if got := c.appliesTo(tc.user, tc.name); got != tc.want {
-			t.Errorf("appliesTo(%q, %q) = %v, want %v", tc.user, tc.name, got, tc.want)
-		}
-	}
-}
-
 func TestNormalizeFillsDefaults(t *testing.T) {
 	c := AntiAttackerConfig{Enabled: true}.normalize()
 	def := defaultTCPProfile()
 	if c.TCP.WindowMs != def.WindowMs || c.TCP.MaxPerWindow != def.MaxPerWindow {
 		t.Fatalf("TCP profile = %+v, want XCord's speedy-login defaults %+v", c.TCP, def)
-	}
-	if c.Scope != "all" {
-		t.Fatalf("Scope = %q, want %q", c.Scope, "all")
 	}
 }
 
@@ -505,7 +481,7 @@ func TestUDPMaxTrackedStopsGrowth(t *testing.T) {
 func TestAdmitUDPOffByDefault(t *testing.T) {
 	f := newTestFirewall(t, nil)
 	for range 100 {
-		if !f.AdmitUDP("1.2.3.4:5000", 9999, "", "game") {
+		if !f.AdmitUDP("1.2.3.4:5000", 9999) {
 			t.Fatal("UDP rate limiting acted while AntiAttacker was off")
 		}
 	}
@@ -516,24 +492,10 @@ func TestAdmitUDPLimits(t *testing.T) {
 		Enabled: true,
 		UDP:     UDPProfile{Enabled: true, WindowMs: 60000, MaxPacketsPerWindow: 2},
 	})
-	f.AdmitUDP("1.2.3.4:5000", 10, "", "game")
-	f.AdmitUDP("1.2.3.4:5000", 10, "", "game")
-	if f.AdmitUDP("1.2.3.4:5000", 10, "", "game") {
+	f.AdmitUDP("1.2.3.4:5000", 10)
+	f.AdmitUDP("1.2.3.4:5000", 10)
+	if f.AdmitUDP("1.2.3.4:5000", 10) {
 		t.Fatal("3rd packet forwarded past a ceiling of 2")
-	}
-}
-
-func TestAdmitUDPRespectsScope(t *testing.T) {
-	f := newAAFirewall(t, AntiAttackerConfig{
-		Enabled: true, Scope: "selected", Proxies: []string{"bob/game"},
-		UDP: UDPProfile{Enabled: true, WindowMs: 60000, MaxPacketsPerWindow: 1},
-	})
-	f.AdmitUDP("1.2.3.4:5000", 10, "bob", "game")
-	if f.AdmitUDP("1.2.3.4:5000", 10, "bob", "game") {
-		t.Fatal("the in-scope proxy was not limited")
-	}
-	if !f.AdmitUDP("1.2.3.4:5000", 10, "bob", "other") {
-		t.Fatal("an out-of-scope proxy was limited")
 	}
 }
 
@@ -553,7 +515,7 @@ func newAAFirewall(t *testing.T, aa AntiAttackerConfig) *Firewall {
 func TestAdmitTCPOffByDefault(t *testing.T) {
 	f := newTestFirewall(t, nil)
 	for range 50 {
-		if v := f.AdmitTCP("1.2.3.4:1000", "", "web"); !v.Allowed {
+		if v := f.AdmitTCP("1.2.3.4:1000"); !v.Allowed {
 			t.Fatal("rate limiting acted while AntiAttacker was off")
 		}
 	}
@@ -565,7 +527,7 @@ func TestAdmitTCPMasterSwitchGatesTheProfile(t *testing.T) {
 		TCP: RateProfile{Enabled: true, MaxPerWindow: 1},
 	})
 	for range 10 {
-		if v := f.AdmitTCP("1.2.3.4:1000", "", "web"); !v.Allowed {
+		if v := f.AdmitTCP("1.2.3.4:1000"); !v.Allowed {
 			t.Fatal("profile acted with the master switch off")
 		}
 	}
@@ -577,26 +539,12 @@ func TestAdmitTCPLimits(t *testing.T) {
 		TCP:     RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 3, BanViolations: 99},
 	})
 	for i := range 3 {
-		if v := f.AdmitTCP("1.2.3.4:1000", "", "web"); !v.Allowed {
+		if v := f.AdmitTCP("1.2.3.4:1000"); !v.Allowed {
 			t.Fatalf("attempt %d refused, want allowed", i+1)
 		}
 	}
-	if v := f.AdmitTCP("1.2.3.4:1000", "", "web"); v.Allowed {
+	if v := f.AdmitTCP("1.2.3.4:1000"); v.Allowed {
 		t.Fatal("4th connection allowed past a limit of 3")
-	}
-}
-
-func TestAdmitTCPScopeSelectedSkipsOtherProxies(t *testing.T) {
-	f := newAAFirewall(t, AntiAttackerConfig{
-		Enabled: true, Scope: "selected", Proxies: []string{"bob/web"},
-		TCP: RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 1, BanViolations: 99},
-	})
-	f.AdmitTCP("1.2.3.4:1000", "bob", "web")
-	if v := f.AdmitTCP("1.2.3.4:1000", "bob", "web"); v.Allowed {
-		t.Fatal("the in-scope proxy was not limited")
-	}
-	if v := f.AdmitTCP("1.2.3.4:1000", "bob", "ssh"); !v.Allowed {
-		t.Fatal("an out-of-scope proxy was limited")
 	}
 }
 
@@ -607,10 +555,10 @@ func TestAdmitHTTPLimitsAndReportsRetryAfter(t *testing.T) {
 			Enabled: true, WindowMs: 60000, MaxPerWindow: 2, BanViolations: 99,
 		}},
 	})
-	f.AdmitHTTP("1.2.3.4:1000", "", "", "web")
-	f.AdmitHTTP("1.2.3.4:1000", "", "", "web")
+	f.AdmitHTTP("1.2.3.4:1000", "")
+	f.AdmitHTTP("1.2.3.4:1000", "")
 
-	v := f.AdmitHTTP("1.2.3.4:1000", "", "", "web")
+	v := f.AdmitHTTP("1.2.3.4:1000", "")
 	if v.Allowed {
 		t.Fatal("3rd request allowed past a limit of 2")
 	}
@@ -624,18 +572,36 @@ func TestAdmitHTTPUsesXFFOnlyFromTrustedProxy(t *testing.T) {
 
 	// Untrusted: both requests count against the one socket address.
 	f := newAAFirewall(t, AntiAttackerConfig{Enabled: true, HTTP: HTTPProfile{RateProfile: base}})
-	f.AdmitHTTP("9.9.9.9:1000", "1.1.1.1", "", "web")
-	if v := f.AdmitHTTP("9.9.9.9:1000", "2.2.2.2", "", "web"); v.Allowed {
+	f.AdmitHTTP("9.9.9.9:1000", "1.1.1.1")
+	if v := f.AdmitHTTP("9.9.9.9:1000", "2.2.2.2"); v.Allowed {
 		t.Fatal("a spoofed X-Forwarded-For split one source into two without a trusted list")
 	}
 
-	// Trusted: they are different clients and both get their first request.
-	f2 := newAAFirewall(t, AntiAttackerConfig{Enabled: true, HTTP: HTTPProfile{
-		RateProfile: base, TrustedProxies: []string{"9.9.9.9"},
-	}})
-	f2.AdmitHTTP("9.9.9.9:1000", "1.1.1.1", "", "web")
-	if v := f2.AdmitHTTP("9.9.9.9:1000", "2.2.2.2", "", "web"); !v.Allowed {
+	// A trusted allow rule naming the proxy: they are different clients and
+	// both get their first request.
+	f2 := newAAFirewall(t, AntiAttackerConfig{Enabled: true, HTTP: HTTPProfile{RateProfile: base}})
+	cfg := f2.Snapshot()
+	cfg.Rules = []Rule{{ID: "lb", Action: "allow", CIDR: "9.9.9.9", Port: "all", Trusted: true}}
+	if err := f2.SetConfig(cfg); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+	f2.AdmitHTTP("9.9.9.9:1000", "1.1.1.1")
+	if v := f2.AdmitHTTP("9.9.9.9:1000", "2.2.2.2"); !v.Allowed {
 		t.Fatal("two clients behind a trusted proxy were counted as one")
+	}
+
+	// And a plain allow rule must not be enough. Believing the header from any
+	// peer an allow rule covers would let a broad rule hand it to everyone,
+	// which does not weaken the limit so much as remove it.
+	f3 := newAAFirewall(t, AntiAttackerConfig{Enabled: true, HTTP: HTTPProfile{RateProfile: base}})
+	cfg3 := f3.Snapshot()
+	cfg3.Rules = []Rule{{ID: "plain", Action: "allow", CIDR: "9.9.9.9", Port: "all"}}
+	if err := f3.SetConfig(cfg3); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+	f3.AdmitHTTP("9.9.9.9:1000", "1.1.1.1")
+	if v := f3.AdmitHTTP("9.9.9.9:1000", "2.2.2.2"); v.Allowed {
+		t.Fatal("a plain allow rule was enough to believe X-Forwarded-For")
 	}
 }
 
@@ -647,8 +613,8 @@ func TestRetryAfterSecondsHonorsOverride(t *testing.T) {
 			RetryAfterSec: 42,
 		},
 	})
-	f.AdmitHTTP("1.2.3.4:1000", "", "", "web")
-	v := f.AdmitHTTP("1.2.3.4:1000", "", "", "web")
+	f.AdmitHTTP("1.2.3.4:1000", "")
+	v := f.AdmitHTTP("1.2.3.4:1000", "")
 	if got := f.RetryAfterSeconds(v); got != 42 {
 		t.Fatalf("RetryAfterSeconds = %d, want the configured 42", got)
 	}
@@ -660,8 +626,8 @@ func TestSetConfigClearsCounters(t *testing.T) {
 		TCP:     RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 1, BanViolations: 99},
 	}
 	f := newAAFirewall(t, aa)
-	f.AdmitTCP("1.2.3.4:1000", "", "web")
-	if v := f.AdmitTCP("1.2.3.4:1000", "", "web"); v.Allowed {
+	f.AdmitTCP("1.2.3.4:1000")
+	if v := f.AdmitTCP("1.2.3.4:1000"); v.Allowed {
 		t.Fatal("limit did not apply before the config change")
 	}
 
@@ -669,7 +635,7 @@ func TestSetConfigClearsCounters(t *testing.T) {
 	if err := f.SetConfig(cfg); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
-	if v := f.AdmitTCP("1.2.3.4:1000", "", "web"); !v.Allowed {
+	if v := f.AdmitTCP("1.2.3.4:1000"); !v.Allowed {
 		t.Fatal("counters survived a config change; they were built against the old thresholds")
 	}
 }
@@ -685,10 +651,10 @@ func TestAntiAttackerSurvivesReload(t *testing.T) {
 	cfg := f.Snapshot()
 	cfg.Enabled = true
 	cfg.AntiAttacker = AntiAttackerConfig{
-		Enabled: true, Scope: "selected", Proxies: []string{"bob/web"},
-		TCP:  RateProfile{Enabled: true, MaxPerWindow: 7},
-		HTTP: HTTPProfile{TrustedProxies: []string{"10.0.0.0/8"}},
+		Enabled: true,
+		TCP:     RateProfile{Enabled: true, MaxPerWindow: 7},
 	}
+	cfg.Rules = []Rule{{ID: "lb", Action: "allow", CIDR: "10.0.0.0/8", Port: "all", Trusted: true}}
 	if err := f.SetConfig(cfg); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
@@ -697,15 +663,16 @@ func TestAntiAttackerSurvivesReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	got := f2.Snapshot().AntiAttacker
-	if !got.Enabled || got.Scope != "selected" || len(got.Proxies) != 1 || got.Proxies[0] != "bob/web" {
-		t.Fatalf("scope did not survive the reload: %+v", got)
+	snap := f2.Snapshot()
+	got := snap.AntiAttacker
+	if !got.Enabled {
+		t.Fatalf("antiAttacker did not survive the reload: %+v", got)
 	}
 	if got.TCP.MaxPerWindow != 7 {
 		t.Fatalf("TCP.MaxPerWindow = %d, want 7", got.TCP.MaxPerWindow)
 	}
-	if len(got.HTTP.TrustedProxies) != 1 {
-		t.Fatalf("TrustedProxies did not survive the reload: %+v", got.HTTP.TrustedProxies)
+	if len(snap.Rules) != 1 || !snap.Rules[0].Trusted {
+		t.Fatalf("the trusted rule did not survive the reload: %+v", snap.Rules)
 	}
 }
 
@@ -766,8 +733,8 @@ func TestControlAndProxyCountersAreSeparate(t *testing.T) {
 			RateProfile: RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 1, BanViolations: 99},
 		},
 	})
-	f.AdmitTCP("1.2.3.4:1000", "", "web")
-	if f.AdmitTCP("1.2.3.4:1000", "", "web").Allowed {
+	f.AdmitTCP("1.2.3.4:1000")
+	if f.AdmitTCP("1.2.3.4:1000").Allowed {
 		t.Fatal("the proxy limit did not apply")
 	}
 	if !f.AdmitControl("1.2.3.4:1000").Allowed {
@@ -861,7 +828,7 @@ func TestControlWebSSHAndProxyCountersAreSeparate(t *testing.T) {
 	for name, allowed := range map[string]bool{
 		"control": f.AdmitControl(addr).Allowed,
 		"ssh":     f.AdmitSSH(addr).Allowed,
-		"proxy":   f.AdmitTCP(addr, "", "web").Allowed,
+		"proxy":   f.AdmitTCP(addr).Allowed,
 	} {
 		if !allowed {
 			t.Errorf("dashboard traffic used up the %s budget for the same address", name)
@@ -882,17 +849,6 @@ func TestWebAndSSHDefaultsAreTighterThanControl(t *testing.T) {
 	// several connections for its assets before anyone types anything.
 	if c.Web.MaxPerWindow < 20 {
 		t.Errorf("web default %d is too tight for a single-page app's asset requests", c.Web.MaxPerWindow)
-	}
-}
-
-func TestValidateAntiAttacker(t *testing.T) {
-	ok := AntiAttackerConfig{HTTP: HTTPProfile{TrustedProxies: []string{"10.0.0.0/8", "1.2.3.4", "::1", ""}}}
-	if err := ValidateAntiAttacker(ok); err != nil {
-		t.Fatalf("valid trusted proxies rejected: %v", err)
-	}
-	bad := AntiAttackerConfig{HTTP: HTTPProfile{TrustedProxies: []string{"10.0.0.0/8", "nonsense"}}}
-	if err := ValidateAntiAttacker(bad); err == nil {
-		t.Fatal("an unparseable trusted proxy was accepted; it would be dropped silently")
 	}
 }
 
@@ -1084,7 +1040,7 @@ func TestAdmitTCPAppliesSubnetTier(t *testing.T) {
 	})
 	allowed := 0
 	for i := range 9 { // nine addresses, one attempt each, all in one /24
-		if f.AdmitTCP("5.252.83."+strconv.Itoa(i)+":1000", "", "web").Allowed {
+		if f.AdmitTCP("5.252.83." + strconv.Itoa(i) + ":1000").Allowed {
 			allowed++
 		}
 	}

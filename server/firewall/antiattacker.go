@@ -15,7 +15,6 @@
 package firewall
 
 import (
-	"fmt"
 	"net/netip"
 	"strings"
 	"sync"
@@ -41,18 +40,6 @@ type AntiAttackerConfig struct {
 	// locks out real users, and unlike a deny rule nobody typed it in against a
 	// specific address - it just starts refusing people.
 	Enabled bool `json:"enabled"`
-
-	// Scope is "all" (every proxy) or "selected" (only those named in Proxies).
-	// Empty means "all".
-	Scope string `json:"scope"`
-
-	// Proxies lists the proxies this applies to when Scope is "selected", each
-	// as "user/name", or bare "name" for proxies registered without a user.
-	//
-	// Named rather than addressed by port because http and https proxies all
-	// answer on the one shared vhost port: a port cannot tell them apart, and
-	// that is exactly where per-proxy limits are most wanted.
-	Proxies []string `json:"proxies,omitempty"`
 
 	// TCP counts connections and is consulted once per accepted connection.
 	TCP RateProfile `json:"tcp"`
@@ -303,14 +290,15 @@ type RateProfile struct {
 type HTTPProfile struct {
 	RateProfile
 
-	// TrustedProxies are the peers whose X-Forwarded-For may be believed, as
-	// IPs or CIDRs. Empty - the default - means the header is ignored and the
-	// socket address is counted.
+	// Which peers' X-Forwarded-For may be believed is not configured here: it
+	// is the allow rules marked trusted. See Rule.Trusted.
 	//
-	// The header is written by whoever is talking to us, so trusting it without
-	// this list does not merely weaken the limit, it removes it: an attacker
-	// sends a different value each request and is never the same source twice.
-	TrustedProxies []string `json:"trustedProxies,omitempty"`
+	// The header is written by whoever is talking to us, so believing it from
+	// the wrong peer does not merely weaken the limit, it removes it - an
+	// attacker sends a different value each request and is never the same
+	// source twice. That is why it is the trusted tick rather than any allow
+	// rule: "allow" says a peer may pass, and a broad allow would hand the
+	// header to everyone it covers.
 
 	// RetryAfterSec is the Retry-After sent with 429. Zero uses the remaining
 	// ban or window, which is what a client actually needs to wait.
@@ -572,11 +560,6 @@ func (c StrikeConfig) normalize(def StrikeConfig) StrikeConfig {
 }
 
 func (c AntiAttackerConfig) normalize() AntiAttackerConfig {
-	scope := strings.ToLower(strings.TrimSpace(c.Scope))
-	if scope != "selected" {
-		scope = "all"
-	}
-	c.Scope = scope
 	c.TCP = c.TCP.normalize(defaultTCPProfile())
 	c.HTTP.RateProfile = c.HTTP.normalize(defaultHTTPProfile().RateProfile)
 	c.UDP = c.UDP.normalize(defaultUDPProfile())
@@ -589,60 +572,7 @@ func (c AntiAttackerConfig) normalize() AntiAttackerConfig {
 	if c.GraceSeconds < 0 {
 		c.GraceSeconds = 0
 	}
-	proxies := make([]string, 0, len(c.Proxies))
-	for _, p := range c.Proxies {
-		if p = strings.TrimSpace(p); p != "" {
-			proxies = append(proxies, p)
-		}
-	}
-	c.Proxies = proxies
 	return c
-}
-
-// appliesTo reports whether the given proxy is in scope. user may be empty for
-// proxies registered without one.
-//
-// Matching on user+name rather than name alone: proxy names are only unique
-// within a user, so keying on the name would hand one tenant's limits to
-// another tenant who happened to pick the same name. A bare "name" entry still
-// matches, so single-user setups need not spell out an empty user.
-func (c AntiAttackerConfig) appliesTo(user, name string) bool {
-	if c.Scope != "selected" {
-		return true
-	}
-	qualified := name
-	if user != "" {
-		qualified = user + "/" + name
-	}
-	for _, p := range c.Proxies {
-		if p == qualified || (user == "" && p == name) {
-			return true
-		}
-	}
-	return false
-}
-
-// ValidateAntiAttacker reports what is wrong with a submitted config, so the
-// API can refuse it instead of storing something that quietly does nothing.
-//
-// Only the trusted proxy list can be wrong in a way worth rejecting: every
-// numeric field has a sane fallback in normalize, but an address that does not
-// parse is dropped, and a trusted list that silently lost an entry means
-// X-Forwarded-For stops being believed without anyone being told.
-func ValidateAntiAttacker(c AntiAttackerConfig) error {
-	for _, e := range c.HTTP.TrustedProxies {
-		e = strings.TrimSpace(e)
-		if e == "" {
-			continue
-		}
-		if _, err := netip.ParsePrefix(e); err == nil {
-			continue
-		}
-		if _, err := netip.ParseAddr(e); err != nil {
-			return fmt.Errorf("trustedProxies: %q is not an IP or CIDR", e)
-		}
-	}
-	return nil
 }
 
 // Verdict is the answer for one attempt.
@@ -1387,12 +1317,12 @@ type Status struct {
 // port. Returns the socket IP whenever the header cannot be believed, so a
 // misconfigured trusted list fails towards counting too coarsely rather than
 // not counting at all.
-func clientKey(peer, xff string, trusted []netip.Prefix) string {
+func clientKey(peer, xff string, trusted func(netip.Addr) bool) string {
 	ip := parseAddr(peer)
 	if !ip.IsValid() {
 		return ""
 	}
-	if xff == "" || len(trusted) == 0 || !prefixesContain(trusted, ip) {
+	if xff == "" || trusted == nil || !trusted(ip) {
 		return ip.String()
 	}
 	// Left-most entry is the original client. Everything after it was added by
@@ -1403,35 +1333,4 @@ func clientKey(peer, xff string, trusted []netip.Prefix) string {
 		return ip.String()
 	}
 	return fwd.Unmap().String()
-}
-
-func prefixesContain(prefixes []netip.Prefix, ip netip.Addr) bool {
-	for _, p := range prefixes {
-		if p.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// compileTrusted turns the configured trusted proxies into prefixes once, at
-// config time, rather than parsing strings per request. A bare address becomes
-// a single-host prefix.
-func compileTrusted(entries []string) []netip.Prefix {
-	out := make([]netip.Prefix, 0, len(entries))
-	for _, e := range entries {
-		e = strings.TrimSpace(e)
-		if e == "" {
-			continue
-		}
-		if p, err := netip.ParsePrefix(e); err == nil {
-			out = append(out, p.Masked())
-			continue
-		}
-		if a, err := netip.ParseAddr(e); err == nil {
-			a = a.Unmap()
-			out = append(out, netip.PrefixFrom(a, a.BitLen()))
-		}
-	}
-	return out
 }

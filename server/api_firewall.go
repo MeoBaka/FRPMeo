@@ -50,16 +50,16 @@ func (svr *Service) apiFirewallPut(w http.ResponseWriter, r *http.Request) {
 			apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		// And the target for the same reason. A typo there compiles to a rule
+		// matching nothing: an allow that silently stops covering somebody, or
+		// a deny that silently stops blocking them.
+		if err := firewall.ValidateRuleTarget(body.Rules[i].CIDR); err != nil {
+			apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		if body.Rules[i].ID == "" {
 			body.Rules[i].ID = fwRandID()
 		}
-	}
-	// Same reasoning as the port spec above: a trusted proxy entry that does not
-	// parse would be dropped, and X-Forwarded-For would quietly stop counting
-	// real clients.
-	if err := firewall.ValidateAntiAttacker(body.AntiAttacker); err != nil {
-		apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
 	}
 	if err := svr.rc.Firewall.SetConfig(body); err != nil {
 		apiWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -89,6 +89,16 @@ func fwRandID() string {
 // then, this moves every second.
 func (svr *Service) apiFirewallStatusGet(w http.ResponseWriter, _ *http.Request) {
 	apiWriteJSON(w, http.StatusOK, svr.rc.Firewall.AntiAttackerStatus())
+}
+
+// GET /api/firewall/domains - what each domain named by a rule resolves to.
+//
+// A rule naming a name is only as good as its last lookup, and one that has
+// been failing for a day is still matching whatever it resolved to yesterday.
+// That is the right behavior - see domainResolver.refresh - but it has to be
+// visible, or a rule quietly stops meaning what it says.
+func (svr *Service) apiFirewallDomainsGet(w http.ResponseWriter, _ *http.Request) {
+	apiWriteJSON(w, http.StatusOK, svr.rc.Firewall.DomainStatus())
 }
 
 // DELETE /api/firewall/bans - lift every ban and forget every strike.

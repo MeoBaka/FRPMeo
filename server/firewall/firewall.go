@@ -57,10 +57,28 @@ import (
 type Rule struct {
 	ID     string `json:"id"`
 	Action string `json:"action"` // "allow" | "deny"
-	CIDR   string `json:"cidr"`   // "1.2.3.0/24", "::1", "1.2.3.4", "" or "*" = any
+	// CIDR is what the rule matches a source against: "1.2.3.0/24", "::1",
+	// "1.2.3.4", a domain name, or "" / "*" for any.
+	//
+	// A domain is resolved in the background and looked up again on an
+	// interval, so a rule can name a connection whose address moves - an office
+	// or a home line on dynamic DNS - and keep meaning the same thing. It works
+	// the same for either action: allow follows the name in, deny follows it
+	// out.
+	CIDR string `json:"cidr"`
 	// Port is a Windows-firewall style spec: "6000", "6000-6010",
 	// "80,443,7000-7010", or "" / "*" / "all" for any port.
-	Port      string `json:"port"`
+	Port string `json:"port"`
+	// Trusted exempts a matching source from the rate limits, the bans and the
+	// reputation provider, not only from the rules. Meaningless on a deny rule.
+	//
+	// Off by default, and deliberately a separate switch rather than something
+	// every allow rule does: an allow rule is usually "this may through", not
+	// "stop protecting this". Turn it on for the addresses you cannot afford to
+	// have locked out by a counter - your own office, a monitoring probe, the
+	// one client whose reconnect storm looks exactly like an attack - and keep
+	// the list short, because it does turn every other layer off for them.
+	Trusted   bool   `json:"trusted,omitempty"`
 	Note      string `json:"note,omitempty"`
 	ExpiresAt int64  `json:"expiresAt,omitempty"` // unix sec, 0 = permanent
 }
@@ -154,6 +172,9 @@ type compiledRule struct {
 	allow   bool
 	anyCIDR bool
 	prefix  netip.Prefix
+	// host is set when the target is a domain rather than an address, in which
+	// case prefix is unused and matching asks the resolver instead.
+	host    string
 	anyPort bool
 	ports   []portRange
 	// reason is what Allow reports when this rule decides, built here so that
@@ -216,7 +237,13 @@ func compileRule(r Rule, index int) compiledRule {
 	default:
 		addr, err := netip.ParseAddr(cidr)
 		if err != nil {
-			c.never = true
+			// Not an address, so it may be a name. A name that is not plausible
+			// either leaves host empty and never set, which is the same answer
+			// a malformed CIDR gets: a rule that visibly does nothing beats one
+			// that quietly widens.
+			if c.host = normalizeDomain(cidr); c.host == "" {
+				c.never = true
+			}
 			break
 		}
 		addr = addr.Unmap()
@@ -225,6 +252,17 @@ func compileRule(r Rule, index int) compiledRule {
 
 	c.ports, c.anyPort = compilePorts(r.Port)
 	return c
+}
+
+// ruleHosts is every domain the rules name, for the resolver to keep current.
+func ruleHosts(rules []compiledRule) []string {
+	out := make([]string, 0, len(rules))
+	for i := range rules {
+		if h := rules[i].host; h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // compilePorts reads a port spec into the ranges it names. A malformed entry is
@@ -243,14 +281,29 @@ func compilePorts(spec string) (ranges []portRange, anyPort bool) {
 	return ranges, false
 }
 
-func (c *compiledRule) match(ip netip.Addr, port int) bool {
-	if c.never {
-		return false
-	}
-	if !c.anyCIDR && (!ip.IsValid() || !c.prefix.Contains(ip)) {
+func (c *compiledRule) match(ip netip.Addr, port int, res *domainResolver) bool {
+	if !c.matchSource(ip, res) {
 		return false
 	}
 	return c.anyPort || matchRanges(c.ports, port)
+}
+
+// matchSource is the half of match that looks only at where the connection came
+// from. Split out because trust is a statement about a source: the counting
+// layers it exempts are per-source, and have no port to check against.
+func (c *compiledRule) matchSource(ip netip.Addr, res *domainResolver) bool {
+	switch {
+	case c.never:
+		return false
+	case c.anyCIDR:
+		return true
+	case !ip.IsValid():
+		return false
+	case c.host != "":
+		return res.has(c.host, ip)
+	default:
+		return c.prefix.Contains(ip)
+	}
 }
 
 func matchRanges(ranges []portRange, port int) bool {
@@ -273,13 +326,14 @@ func plainRules(rules []compiledRule) []Rule {
 }
 
 type state struct {
-	Enabled      *bool              `json:"enabled,omitempty"` // nil = enabled
-	ControlPort  bool               `json:"controlPort"`
-	WebPort      bool               `json:"webPort"`
-	Default      string             `json:"default"`
-	Rules        []Rule             `json:"rules"`
-	Provider     ProviderConfig     `json:"provider"`
-	AntiAttacker AntiAttackerConfig `json:"antiAttacker"`
+	Enabled          *bool              `json:"enabled,omitempty"` // nil = enabled
+	ControlPort      bool               `json:"controlPort"`
+	WebPort          bool               `json:"webPort"`
+	Default          string             `json:"default"`
+	Rules            []Rule             `json:"rules"`
+	Provider         ProviderConfig     `json:"provider"`
+	AntiAttacker     AntiAttackerConfig `json:"antiAttacker"`
+	DomainRefreshSec int                `json:"domainRefreshSec,omitempty"`
 }
 
 // Config is the whole of what the firewall is told, and the whole of what it
@@ -302,6 +356,9 @@ type Config struct {
 	// AntiAttacker rate-limits sources that the rules and the provider already
 	// let through. Off by default; see AntiAttackerConfig.
 	AntiAttacker AntiAttackerConfig `json:"antiAttacker"`
+	// DomainRefreshSec is how often a rule that names a domain looks the name
+	// up again. Zero uses defaultDomainRefreshSec.
+	DomainRefreshSec int `json:"domainRefreshSec,omitempty"`
 }
 
 type repEntry struct {
@@ -339,11 +396,8 @@ type Firewall struct {
 	repCache    map[string]repEntry
 	repInFlight map[string]chan struct{}
 
-	// aa and its two limiters are the rate-limiting half. aaTrusted is the
-	// compiled form of HTTP.TrustedProxies, parsed on config change so a
-	// per-request path never parses strings.
+	// aa and its limiters are the rate-limiting half.
 	aa          AntiAttackerConfig
-	aaTrusted   []netip.Prefix
 	tcpLimiter  *limiter
 	httpLimiter *limiter
 	udpLimiter  *udpLimiter
@@ -366,6 +420,11 @@ type Firewall struct {
 	conc      *concurrency
 	startedAt int64 // ms, for the grace period
 	nowMsFn   func() int64
+
+	// domains holds what the names used in rules currently resolve to, and
+	// domainRefreshSec is how often it looks again.
+	domains          *domainResolver
+	domainRefreshSec int
 
 	// monitors aggregate what each surface decided, so a flood costs a line
 	// every few seconds instead of one per connection.
@@ -395,6 +454,7 @@ func New(path string) (*Firewall, error) {
 		startedAt:   time.Now().UnixMilli(),
 		monitors:    make(map[Surface]*monitor, len(surfaces)),
 	}
+	f.domains = newDomainResolver(f.nowMsFn)
 	for _, s := range surfaces {
 		f.monitors[s] = newMonitor(string(s))
 	}
@@ -412,6 +472,7 @@ func New(path string) (*Firewall, error) {
 		f.rules = compileRules(s.Rules)
 		f.provider = s.Provider
 		f.aa = s.AntiAttacker
+		f.domainRefreshSec = s.DomainRefreshSec
 	case os.IsNotExist(err):
 	default:
 		return nil, err
@@ -423,12 +484,30 @@ func New(path string) (*Firewall, error) {
 	f.pruneLocked()
 	f.buildClientLocked()
 	f.applyAntiAttackerLocked(f.aa)
+	f.domains.setHosts(ruleHosts(f.rules), f.domainRefreshSec)
 	_ = f.saveLocked()
 	f.mu.Unlock()
 
+	// Resolved once before serving rather than on the first tick. A rule naming
+	// a domain decides nothing until the name has an address behind it, and the
+	// first client to arrive is exactly who an allow rule was written for.
+	f.domains.refresh(context.Background())
+
 	go f.sweep()
+	go f.refreshDomains()
 	go f.reportSurfaces()
 	return f, nil
+}
+
+// refreshDomains keeps the names used in rules current. It wakes often and does
+// nothing most of the time - what is due is decided per name against the
+// configured interval, so a config change takes effect without restarting this.
+func (f *Firewall) refreshDomains() {
+	t := time.NewTicker(domainTickSec * time.Second)
+	defer t.Stop()
+	for range t.C {
+		f.domains.refresh(context.Background())
+	}
 }
 
 func (f *Firewall) sweep() {
@@ -497,7 +576,7 @@ func (f *Firewall) Allow(remoteAddr string, port int) (bool, string) {
 		if r.ExpiresAt != 0 && r.ExpiresAt <= now {
 			continue
 		}
-		if r.match(ip, port) {
+		if r.match(ip, port, f.domains) {
 			allow, reason := r.allow, r.reason
 			f.mu.RUnlock()
 			return allow, reason
@@ -724,8 +803,18 @@ func (f *Firewall) Snapshot() Config {
 	return Config{
 		Enabled: f.enabled, ControlPort: f.controlPort, WebPort: f.webPort,
 		Default: f.def, Rules: plainRules(f.rules), Provider: f.provider,
-		AntiAttacker: f.aa,
+		AntiAttacker: f.aa, DomainRefreshSec: f.domainRefreshSec,
 	}
+}
+
+// DomainStatus reports what each domain named by a rule currently resolves to.
+//
+// A name that stopped resolving is still matching its old addresses and nothing
+// else, which is a thing an operator has to be able to see - an allow rule that
+// quietly stopped covering somebody and a deny rule that quietly stopped
+// blocking them are the same failure.
+func (f *Firewall) DomainStatus() []DomainStatus {
+	return f.domains.status()
 }
 
 // SetConfig replaces the whole configuration.
@@ -748,19 +837,20 @@ func (f *Firewall) SetConfig(c Config) error {
 	f.provider = provider
 	f.buildClientLocked()
 	f.applyAntiAttackerLocked(c.AntiAttacker)
+	f.domainRefreshSec = c.DomainRefreshSec
+	f.domains.setHosts(ruleHosts(f.rules), f.domainRefreshSec)
 	f.repMu.Lock()
 	f.repCache = make(map[string]repEntry)
 	f.repMu.Unlock()
 	return f.saveLocked()
 }
 
-// applyAntiAttackerLocked stores a normalized config and compiles the trusted
-// proxy list. Counters are dropped whenever the settings change: they were
+// applyAntiAttackerLocked stores a normalized config. Counters are dropped
+// whenever the settings change: they were
 // accumulated against different thresholds, and keeping them could hold someone
 // in a ban that the new settings would never have handed out.
 func (f *Firewall) applyAntiAttackerLocked(c AntiAttackerConfig) {
 	f.aa = c.normalize()
-	f.aaTrusted = compileTrusted(f.aa.HTTP.TrustedProxies)
 	f.tcpLimiter.reset()
 	f.httpLimiter.reset()
 	f.udpLimiter.reset()
@@ -792,6 +882,12 @@ func (f *Firewall) exempt(key string, c AntiAttackerConfig) (skip bool, refuse b
 	if f.inGrace(c.GraceSeconds) {
 		return true, false
 	}
+	// A rule marked trusted covers the counting layers too, not only the rules.
+	// An exemption that stopped at the rules would still let a reconnect storm
+	// from the one client you cannot lock out get it banned.
+	if f.trustedSource(parseAddr(key)) {
+		return true, false
+	}
 	if f.trust.trusted(key, c.Trust) {
 		return true, false
 	}
@@ -799,6 +895,40 @@ func (f *Firewall) exempt(key string, c AntiAttackerConfig) (skip bool, refuse b
 		return false, true
 	}
 	return false, false
+}
+
+// trustedSource reports whether an allow rule marked trusted names ip.
+//
+// The port is not consulted, unlike everywhere else rules are matched. What
+// this exempts is the counting layers, and those count per source rather than
+// per destination: a client is one budget however many of your ports it reaches
+// for. So a trusted rule is read as a statement about who is connecting, and
+// the port it names still narrows the allow half of the rule as usual.
+func (f *Firewall) trustedSource(ip netip.Addr) bool {
+	if !ip.IsValid() {
+		return false
+	}
+
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	if !f.enabled {
+		return false
+	}
+	now := f.nowFn()
+	for i := range f.rules {
+		r := &f.rules[i]
+		if !r.allow || !r.Trusted {
+			continue
+		}
+		if r.ExpiresAt != 0 && r.ExpiresAt <= now {
+			continue
+		}
+		if r.matchSource(ip, f.domains) {
+			return true
+		}
+	}
+	return false
 }
 
 var verdictStruck = Verdict{Reason: "struck (not a client)"}
@@ -903,7 +1033,7 @@ func (f *Firewall) AcquireConn(remoteAddr string) (ok bool, release func()) {
 // Callers should close a refused connection with RST rather than a graceful
 // close - see netpkg.CloseWithReset. A refusal that leaves a socket in
 // TIME_WAIT for two minutes is a poor answer to a flood.
-func (f *Firewall) AdmitTCP(remoteAddr, user, proxyName string) Verdict {
+func (f *Firewall) AdmitTCP(remoteAddr string) Verdict {
 	f.mu.RLock()
 	c := f.aa
 	on := f.enabled && c.Enabled
@@ -916,7 +1046,7 @@ func (f *Firewall) AdmitTCP(remoteAddr, user, proxyName string) Verdict {
 	// from the parts still being policed would be the wrong number.
 	f.attack.note(c.Attack)
 
-	if !c.TCP.Enabled || !c.appliesTo(user, proxyName) {
+	if !c.TCP.Enabled {
 		return verdictAllow
 	}
 	key := clientKey(remoteAddr, "", nil)
@@ -929,22 +1059,21 @@ func (f *Firewall) AdmitTCP(remoteAddr, user, proxyName string) Verdict {
 }
 
 // AdmitHTTP rate-limits one request served by the vhost reverse proxy. xff is
-// the raw X-Forwarded-For header, which is only believed when the peer is a
-// configured trusted proxy.
+// the raw X-Forwarded-For header, which is only believed when the peer is
+// covered by an allow rule marked trusted.
 //
 // Per request rather than per connection because the reverse proxy pools work
 // connections by route: checking at connection setup would wave through every
 // request that landed on an already-open one.
-func (f *Firewall) AdmitHTTP(remoteAddr, xff, user, proxyName string) Verdict {
+func (f *Firewall) AdmitHTTP(remoteAddr, xff string) Verdict {
 	f.mu.RLock()
 	c := f.aa
-	trusted := f.aaTrusted
-	on := f.enabled && c.Enabled && c.HTTP.Enabled && c.appliesTo(user, proxyName)
+	on := f.enabled && c.Enabled && c.HTTP.Enabled
 	f.mu.RUnlock()
 	if !on {
 		return verdictAllow
 	}
-	key := clientKey(remoteAddr, xff, trusted)
+	key := clientKey(remoteAddr, xff, f.trustedSource)
 	if skip, refuse := f.exempt(key, c); skip {
 		return verdictAllow
 	} else if refuse {
@@ -956,8 +1085,7 @@ func (f *Firewall) AdmitHTTP(remoteAddr, xff, user, proxyName string) Verdict {
 // AdmitControl rate-limits one connection to the frps control port, after
 // AllowControl has allowed it.
 //
-// The control port carries no proxy, so the Scope setting does not apply here -
-// it is armed by its own AntiAttacker.Control.Protect switch instead.
+// Armed by its own AntiAttacker.Control.Protect switch.
 //
 // Note what a refusal means here, which is not what it means for a user
 // connection: the peer is an frpc client, and turning it away keeps its tunnels
@@ -1033,10 +1161,10 @@ func (f *Firewall) AdmitSSH(remoteAddr string) Verdict {
 //
 // Returns a bool rather than a Verdict: there is nowhere for a reason or a
 // retry hint to go, and this runs per packet.
-func (f *Firewall) AdmitUDP(remoteAddr string, size int, user, proxyName string) bool {
+func (f *Firewall) AdmitUDP(remoteAddr string, size int) bool {
 	f.mu.RLock()
 	p := f.aa.UDP
-	on := f.enabled && f.aa.Enabled && p.Enabled && f.aa.appliesTo(user, proxyName)
+	on := f.enabled && f.aa.Enabled && p.Enabled
 	f.mu.RUnlock()
 	if !on {
 		return true
@@ -1188,7 +1316,7 @@ func (f *Firewall) saveLocked() error {
 	s := state{
 		Enabled: &enabled, ControlPort: f.controlPort, WebPort: f.webPort,
 		Default: f.def, Rules: plainRules(f.rules), Provider: f.provider,
-		AntiAttacker: f.aa,
+		AntiAttacker: f.aa, DomainRefreshSec: f.domainRefreshSec,
 	}
 	if s.Rules == nil {
 		s.Rules = []Rule{}

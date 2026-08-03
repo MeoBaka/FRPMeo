@@ -35,7 +35,7 @@ func TestGracePeriodSuspendsEverything(t *testing.T) {
 		Control: ControlProfile{Protect: true, RateProfile: RateProfile{WindowMs: 60000, MaxPerWindow: 1}},
 	})
 	for range 50 {
-		if !f.AdmitTCP("1.2.3.4:1000", "", "web").Allowed {
+		if !f.AdmitTCP("1.2.3.4:1000").Allowed {
 			t.Fatal("a proxy connection was refused during the grace period")
 		}
 		if !f.AdmitControl("1.2.3.4:1000").Allowed {
@@ -52,8 +52,8 @@ func TestGraceOffMeansLimitsApplyImmediately(t *testing.T) {
 		Enabled: true, // GraceSeconds 0
 		TCP:     RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 1, BanViolations: 99},
 	})
-	f.AdmitTCP("1.2.3.4:1000", "", "web")
-	if f.AdmitTCP("1.2.3.4:1000", "", "web").Allowed {
+	f.AdmitTCP("1.2.3.4:1000")
+	if f.AdmitTCP("1.2.3.4:1000").Allowed {
 		t.Fatal("with no grace configured the limit should bite at once")
 	}
 }
@@ -154,8 +154,8 @@ func TestTrustExemptsAfterRealUse(t *testing.T) {
 		Trust:   TrustConfig{Enabled: true, AfterMs: 1000, MinBytes: 100, ForSeconds: 3600},
 	})
 	const addr = "1.2.3.4:1000"
-	f.AdmitTCP(addr, "", "web")
-	if f.AdmitTCP(addr, "", "web").Allowed {
+	f.AdmitTCP(addr)
+	if f.AdmitTCP(addr).Allowed {
 		t.Fatal("limit did not apply before trust was earned")
 	}
 
@@ -163,7 +163,7 @@ func TestTrustExemptsAfterRealUse(t *testing.T) {
 	f.NoteConnectionClosed(addr, 5*time.Second, 4096)
 
 	for range 20 {
-		if !f.AdmitTCP(addr, "", "web").Allowed {
+		if !f.AdmitTCP(addr).Allowed {
 			t.Fatal("a trusted source was still being rate limited")
 		}
 	}
@@ -180,8 +180,8 @@ func TestTrustNotGrantedForShortOrSilentConnections(t *testing.T) {
 	f.NoteConnectionClosed("2.2.2.2:1", 10*time.Millisecond, 999999)
 
 	for _, a := range []string{"1.1.1.1:1", "2.2.2.2:1"} {
-		f.AdmitTCP(a, "", "web")
-		if f.AdmitTCP(a, "", "web").Allowed {
+		f.AdmitTCP(a)
+		if f.AdmitTCP(a).Allowed {
 			t.Fatalf("%s was trusted without earning it", a)
 		}
 	}
@@ -202,7 +202,7 @@ func TestEmptyConnectionsEarnAStrikeBan(t *testing.T) {
 	for range 3 {
 		f.NoteConnectionClosed(addr, 50*time.Millisecond, 10)
 	}
-	v := f.AdmitTCP(addr, "", "web")
+	v := f.AdmitTCP(addr)
 	if v.Allowed {
 		t.Fatal("a source with three empty connections was still admitted")
 	}
@@ -236,7 +236,7 @@ func TestRealTrafficDoesNotEarnStrikes(t *testing.T) {
 	for range 20 {
 		f.NoteConnectionClosed(addr, time.Second, 1_000_000)
 	}
-	if !f.AdmitTCP(addr, "", "web").Allowed {
+	if !f.AdmitTCP(addr).Allowed {
 		t.Fatal("a source doing real work collected strikes")
 	}
 }
@@ -251,7 +251,7 @@ func TestStrikesOffByDefault(t *testing.T) {
 		f.NoteConnectionClosed(addr, time.Millisecond, 0)
 		f.ReportProtocolFailure(addr)
 	}
-	if !f.AdmitTCP(addr, "", "web").Allowed {
+	if !f.AdmitTCP(addr).Allowed {
 		t.Fatal("strikes acted while the group was switched off")
 	}
 }
@@ -339,7 +339,7 @@ func TestStatusHidesAggregateBuckets(t *testing.T) {
 		},
 	})
 	for i := range 6 {
-		f.AdmitTCP("5.252.83."+strconv.Itoa(i)+":1", "", "web")
+		f.AdmitTCP("5.252.83." + strconv.Itoa(i) + ":1")
 	}
 	for _, b := range f.AntiAttackerStatus().Bans {
 		if strings.HasPrefix(b.Source, "net:") {

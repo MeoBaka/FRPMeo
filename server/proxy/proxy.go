@@ -467,10 +467,6 @@ func (pxy *BaseProxy) newUDPAdmitFilter(port int) func(string, int) bool {
 
 	fw := pxy.GetResourceController().Firewall
 
-	user := pxy.GetUserInfo().User
-
-	name := pxy.GetName()
-
 	if base == nil && fw == nil {
 		return nil
 	}
@@ -480,7 +476,7 @@ func (pxy *BaseProxy) newUDPAdmitFilter(port int) func(string, int) bool {
 			return false
 		}
 
-		return fw == nil || fw.AdmitUDP(remoteAddr, packetSize, user, name)
+		return fw == nil || fw.AdmitUDP(remoteAddr, packetSize)
 	}
 }
 
@@ -521,10 +517,6 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 
 	fw := pxy.GetResourceController().Firewall
 
-	user := pxy.GetUserInfo().User
-
-	name := pxy.GetName()
-
 	return func(req *http.Request) vhost.AllowDecision {
 		// Rules and the plugin hook first: those are about who is asking, and a
 
@@ -544,7 +536,7 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 
 		// is trusted enough for it to mean anything.
 
-		v := fw.AdmitHTTP(req.RemoteAddr, req.Header.Get("X-Forwarded-For"), user, name)
+		v := fw.AdmitHTTP(req.RemoteAddr, req.Header.Get("X-Forwarded-For"))
 
 		if v.Allowed {
 			return vhost.AllowDecisionOK
@@ -735,7 +727,7 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 		// BaseProxy.visitorAuthenticated.
 
 		if !pxy.visitorAuthenticated {
-			if v := fw.AdmitTCP(remoteAddr, pxy.GetUserInfo().User, pxy.GetName()); !v.Allowed {
+			if v := fw.AdmitTCP(remoteAddr); !v.Allowed {
 
 				fw.NoteDecision(firewall.SurfaceProxy, false, v.Reason, remoteAddr)
 
