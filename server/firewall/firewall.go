@@ -982,6 +982,22 @@ func (f *Firewall) HandshakeTimeout(def time.Duration) time.Duration {
 	return def
 }
 
+// HandshakeByteLimit is how much a peer may send before it has finished
+// identifying itself, or 0 for no limit.
+//
+// Not gated on the attack state, unlike the timeout it sits beside: the ceiling
+// is far enough above anything a real client sends that leaving it armed costs
+// nothing, and a peer spending our memory is worth cutting off whether or not
+// the connection rate has crossed a line.
+func (f *Firewall) HandshakeByteLimit() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if !f.enabled || !f.aa.Enabled || !f.aa.Attack.Enabled {
+		return 0
+	}
+	return f.aa.Attack.InitialBufferLimitBytes
+}
+
 // ReportProtocolFailure records that a peer failed to speak frp's protocol - a
 // non-TLS connection to a TLS-only port, a login that did not verify.
 //

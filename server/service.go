@@ -1222,11 +1222,27 @@ func (svr *Service) admitAndServe(c net.Conn, internal bool, release func()) {
 
 		timeout := connReadTimeout
 
+		// And bounded by size as well as by time. A peer that opens a
+		// connection and then pushes megabytes without ever identifying itself
+		// breaks no rate at all - one connection is one connection - but it
+		// does spend the memory a pending handshake holds.
+
+		doneHandshake := func() {}
+
 		if svr.rc.Firewall != nil {
 			timeout = svr.rc.Firewall.HandshakeTimeout(timeout)
+
+			c, doneHandshake = netpkg.LimitHandshake(c, svr.rc.Firewall.HandshakeByteLimit())
 		}
 
 		c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, timeout)
+
+		// Lifted as soon as the peer has identified itself, and not deferred:
+		// serving runs to the end of this function, so a deferred lift would
+		// leave the cap in force for the whole life of the tunnel.
+
+		doneHandshake()
+
 		if err != nil {
 
 			log.Warnf("client conn [%s] failed the TLS check: %v", originConn.RemoteAddr(), err)

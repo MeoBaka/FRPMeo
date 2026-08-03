@@ -117,6 +117,20 @@ type AttackConfig struct {
 	// cutting ten seconds to two frees them five times faster. It is also the
 	// most disruptive if left on permanently, which is why it lives here.
 	InitialTimeoutMs int `json:"initialTimeoutMs"`
+	// InitialBufferLimitBytes caps how much a peer may send before it has
+	// finished identifying itself. Zero leaves it alone.
+	//
+	// Nothing legitimate needs much here: a TLS ClientHello runs to a few
+	// hundred bytes and frp's own header is smaller, so a peer that has pushed
+	// kilobytes without completing the handshake is not mid-negotiation, it is
+	// spending our memory. The connection counters cannot see it - one
+	// connection is one connection however many megabytes it carries - which
+	// is what makes this a different measurement rather than a tighter one.
+	//
+	// Unlike the timeout beside it, this one is not gated on the attack state:
+	// the ceiling is far enough above real traffic that leaving it armed costs
+	// honest clients nothing.
+	InitialBufferLimitBytes int `json:"initialBufferLimitBytes,omitempty"`
 }
 
 // TrustConfig exempts a source that has already proved itself.
@@ -481,7 +495,13 @@ func (p RateProfile) normalize(def RateProfile) RateProfile {
 // cannot. They are set low on purpose: unlike a rate, these fire on evidence
 // that a peer is not a client at all, so there is little reason to be patient.
 func defaultAttack() AttackConfig {
-	return AttackConfig{ConnectionsPerSec: 40, CooldownSec: 60, InitialTimeoutMs: 2000}
+	// 64 KiB before a peer has said who it is. Two orders of magnitude above a
+	// large ClientHello, so it never argues with a real client, and small
+	// enough that a peer trying to make frps hold memory is cut off early.
+	return AttackConfig{
+		ConnectionsPerSec: 40, CooldownSec: 60, InitialTimeoutMs: 2000,
+		InitialBufferLimitBytes: 65536,
+	}
 }
 
 func defaultTrust() TrustConfig {
