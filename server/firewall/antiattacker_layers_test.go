@@ -267,7 +267,7 @@ func TestGlobalTierCatchesWidelySpreadTraffic(t *testing.T) {
 
 	allowed := 0
 	for i := range 12 {
-		if l.admitBoth(strconv.Itoa(10+i)+".0.0.1", p).Allowed {
+		if l.admitBoth(strconv.Itoa(10+i)+".0.0.1", p, true).Allowed {
 			allowed++
 		}
 	}
@@ -353,5 +353,76 @@ func TestStatusIsEmptyWhenDisabled(t *testing.T) {
 	st := f.AntiAttackerStatus()
 	if st.UnderAttack || len(st.Bans) != 0 {
 		t.Fatalf("status = %+v, want nothing reported while AntiAttacker is off", st)
+	}
+}
+
+// --- bans are gated on the attack state ---
+
+// A quiet server has no business banning anyone. The throttle already turned
+// the attempt away; the step to "locked out for a minute" is the one that hurts
+// a real client having a bad minute, and nothing is under attack to justify it.
+func TestViolationsDoNotBanWhileCalm(t *testing.T) {
+	c := &fakeClock{ms: 1_000_000}
+	l := newLimiter(c.now)
+	p := RateProfile{Enabled: true, WindowMs: 1000, MaxPerWindow: 1, BanViolations: 2, BanSeconds: 60, IdleForgetMs: 60000, MaxTracked: 100}
+
+	for range 5 {
+		l.admit("1.2.3.4", p, false) // fills the window
+		if v := l.admit("1.2.3.4", p, false); v.Banned {
+			t.Fatal("a ban was handed out while nothing was under attack")
+		}
+		c.advance(1100 * time.Millisecond) // next window, another violation
+	}
+}
+
+// The violations still accumulate while calm, so a source that keeps it up into
+// an attack is banned on the spot rather than starting its count over.
+func TestViolationsCarryIntoTheAttack(t *testing.T) {
+	c := &fakeClock{ms: 1_000_000}
+	l := newLimiter(c.now)
+	p := RateProfile{Enabled: true, WindowMs: 1000, MaxPerWindow: 1, BanViolations: 2, BanSeconds: 60, IdleForgetMs: 60000, MaxTracked: 100}
+
+	// Two violations while calm: throttled both times, never banned.
+	for range 2 {
+		l.admit("1.2.3.4", p, false)
+		if v := l.admit("1.2.3.4", p, false); v.Banned {
+			t.Fatal("banned while calm")
+		}
+		c.advance(1100 * time.Millisecond)
+	}
+
+	// The attack starts. The next overflow finds the count already there.
+	l.admit("1.2.3.4", p, true)
+	if v := l.admit("1.2.3.4", p, true); !v.Banned {
+		t.Fatal("the violations counted while calm did not carry into the attack")
+	}
+}
+
+// The gate itself: only while under attack, unless the detector is switched
+// off - turning the detector off must not quietly disable banning as well.
+func TestBanningGate(t *testing.T) {
+	f := newAAFirewall(t, AntiAttackerConfig{
+		Enabled: true,
+		Attack:  AttackConfig{Enabled: true, ConnectionsPerSec: 2, CooldownSec: 60},
+	})
+	c := f.Snapshot().AntiAttacker
+
+	if f.banning(c) {
+		t.Error("bans allowed on a calm server")
+	}
+
+	// Push the rate over the line, then let the second finish so it is judged.
+	for range 5 {
+		f.attack.note(c.Attack)
+	}
+	f.attack.overAt = f.nowMsFn()
+	if !f.banning(c) {
+		t.Error("bans withheld while under attack")
+	}
+
+	off := c
+	off.Attack.Enabled = false
+	if !f.banning(off) {
+		t.Error("switching the attack detector off also disabled banning")
 	}
 }

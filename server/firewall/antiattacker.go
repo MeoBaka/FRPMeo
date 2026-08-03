@@ -626,7 +626,11 @@ func newLimiter(nowMs func() int64) *limiter {
 // alternative - counting every attempt, ban included - means a client that
 // retries every second holds itself in the ban forever, and a client that
 // retries is exactly what a browser or a reconnecting tunnel is.
-func (l *limiter) admit(key string, p RateProfile) Verdict {
+//
+// banning says whether a violation may escalate to a ban right now. With it
+// false the source is still throttled and its violation still counted; only the
+// step from counting to banning is withheld. See Firewall.banning.
+func (l *limiter) admit(key string, p RateProfile, banning bool) Verdict {
 	if !p.Enabled || key == "" {
 		return verdictAllow
 	}
@@ -687,7 +691,13 @@ func (l *limiter) admit(key string, p RateProfile) Verdict {
 	if !t.violated {
 		t.violated = true
 		t.violations++
-		if t.violations >= p.BanViolations {
+		// Bans are handed out only while frps is actually under attack. A
+		// server nobody is flooding has no business banning anyone: a client
+		// that trips the window twice at three in the morning is a client
+		// having a bad minute, not an attacker, and the throttle already dealt
+		// with it. Violations still accumulate, so a source that keeps it up
+		// into an attack is banned on the spot rather than starting over.
+		if banning && t.violations >= p.BanViolations {
 			t.bannedUntil = now + int64(p.BanSeconds)*1000
 			t.violations = 0
 			return Verdict{
@@ -1032,7 +1042,7 @@ const globalKey = "net:*"
 // touched: a source turned away for what its neighbors are doing has not made
 // an attempt of its own, and counting it would push it towards a ban it did not
 // earn.
-func (l *limiter) admitBoth(key string, p RateProfile) Verdict {
+func (l *limiter) admitBoth(key string, p RateProfile, banning bool) Verdict {
 	// Widest tier first, narrowest last. Each one that refuses does so before
 	// the narrower counters are touched, so a source turned away for the
 	// company it keeps is not also pushed towards a ban of its own.
@@ -1040,7 +1050,7 @@ func (l *limiter) admitBoth(key string, p RateProfile) Verdict {
 		gp := p
 		gp.MaxPerWindow = p.GlobalMaxPerWindow
 		gp.BanViolations = maxInt // throttle only, like the subnet tier
-		if v := l.admit(globalKey, gp); !v.Allowed {
+		if v := l.admit(globalKey, gp, banning); !v.Allowed {
 			v.Reason = "rate limit (global)"
 			return v
 		}
@@ -1054,13 +1064,13 @@ func (l *limiter) admitBoth(key string, p RateProfile) Verdict {
 			// reach is how that is expressed, so the escalation simply never
 			// fires.
 			sp.BanViolations = maxInt
-			if v := l.admit(sk, sp); !v.Allowed {
+			if v := l.admit(sk, sp, banning); !v.Allowed {
 				v.Reason = "rate limit (subnet)"
 				return v
 			}
 		}
 	}
-	return l.admit(key, p)
+	return l.admit(key, p, banning)
 }
 
 const maxInt = int(^uint(0) >> 1)

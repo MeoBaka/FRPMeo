@@ -64,7 +64,7 @@ func newTestLimiter() (*limiter, *fakeClock) {
 func admitN(l *limiter, key string, p RateProfile, n int) int {
 	allowed := 0
 	for range n {
-		if l.admit(key, p).Allowed {
+		if l.admit(key, p, true).Allowed {
 			allowed++
 		}
 	}
@@ -85,7 +85,7 @@ func TestAdmitDisabledProfileAllowsEverything(t *testing.T) {
 
 func TestAdmitEmptyKeyAllows(t *testing.T) {
 	l, _ := newTestLimiter()
-	if !l.admit("", testProfile()).Allowed {
+	if !l.admit("", testProfile(), true).Allowed {
 		t.Fatal("empty key was refused; an unparseable address must not be counted")
 	}
 }
@@ -97,7 +97,7 @@ func TestAdmitWindowLimit(t *testing.T) {
 	if got := admitN(l, "1.2.3.4", p, 3); got != 3 {
 		t.Fatalf("allowed %d of the first 3, want 3", got)
 	}
-	v := l.admit("1.2.3.4", p)
+	v := l.admit("1.2.3.4", p, true)
 	if v.Allowed {
 		t.Fatal("4th attempt in the window was allowed")
 	}
@@ -133,7 +133,7 @@ func TestBurstInOneWindowCountsAsOneViolation(t *testing.T) {
 
 	// 50 attempts over the limit, all inside the first window.
 	for range 50 {
-		if v := l.admit("1.2.3.4", p); v.Banned {
+		if v := l.admit("1.2.3.4", p, true); v.Banned {
 			t.Fatal("banned inside a single window; a burst must only throttle")
 		}
 	}
@@ -148,7 +148,7 @@ func TestBanAfterRepeatedBadWindows(t *testing.T) {
 
 	var banned bool
 	for range 4 { // window 2 goes over -> violation 2 -> ban
-		if l.admit("1.2.3.4", p).Banned {
+		if l.admit("1.2.3.4", p, true).Banned {
 			banned = true
 			break
 		}
@@ -156,7 +156,7 @@ func TestBanAfterRepeatedBadWindows(t *testing.T) {
 	if !banned {
 		t.Fatal("no ban after two bad windows")
 	}
-	v := l.admit("1.2.3.4", p)
+	v := l.admit("1.2.3.4", p, true)
 	if v.Allowed || !v.Banned {
 		t.Fatalf("after the ban, verdict = %+v, want refused and banned", v)
 	}
@@ -178,13 +178,13 @@ func TestRetryDuringBanDoesNotExtendIt(t *testing.T) {
 	// Retry once a second for the whole ban, as a real client would.
 	for range 9 {
 		c.advance(1 * time.Second)
-		if l.admit("1.2.3.4", p).Allowed {
+		if l.admit("1.2.3.4", p, true).Allowed {
 			t.Fatal("allowed while still banned")
 		}
 	}
 	c.advance(1500 * time.Millisecond) // ban has now run out
 
-	if !l.admit("1.2.3.4", p).Allowed {
+	if !l.admit("1.2.3.4", p, true).Allowed {
 		t.Fatal("still refused after the ban expired; retries extended it")
 	}
 }
@@ -201,7 +201,7 @@ func TestBanExpiryClearsViolations(t *testing.T) {
 	// One bad window right after the ban must not ban again immediately: the
 	// violation count starts from zero.
 	for range 4 {
-		if l.admit("1.2.3.4", p).Banned {
+		if l.admit("1.2.3.4", p, true).Banned {
 			t.Fatal("re-banned on the first bad window after a ban expired")
 		}
 	}
@@ -215,7 +215,7 @@ func TestIdleForgetsViolations(t *testing.T) {
 	c.advance(6 * time.Second) // quiet for longer than IdleForgetMs
 
 	for range 4 {
-		if l.admit("1.2.3.4", p).Banned {
+		if l.admit("1.2.3.4", p, true).Banned {
 			t.Fatal("a violation survived the idle period and led to a ban")
 		}
 	}
@@ -226,7 +226,7 @@ func TestSourcesAreCountedSeparately(t *testing.T) {
 	p := testProfile()
 
 	admitN(l, "1.2.3.4", p, 4)
-	if !l.admit("5.6.7.8", p).Allowed {
+	if !l.admit("5.6.7.8", p, true).Allowed {
 		t.Fatal("one source's limit refused a different source")
 	}
 }
@@ -237,7 +237,7 @@ func TestMaxTrackedStopsGrowth(t *testing.T) {
 	p.MaxTracked = 10
 
 	for i := range 50 {
-		l.admit("10.0.0."+strconv.Itoa(i), p)
+		l.admit("10.0.0."+strconv.Itoa(i), p, true)
 	}
 	if l.size() > p.MaxTracked {
 		t.Fatalf("tracked %d sources, cap is %d", l.size(), p.MaxTracked)
@@ -254,10 +254,10 @@ func TestPruneReclaimsIdleSources(t *testing.T) {
 	p.MaxTracked = 10
 
 	for i := range 10 {
-		l.admit("10.0.0."+strconv.Itoa(i), p)
+		l.admit("10.0.0."+strconv.Itoa(i), p, true)
 	}
-	c.advance(6 * time.Second) // everything is now idle
-	l.admit("10.0.1.1", p)     // trips the prune, then fits
+	c.advance(6 * time.Second)   // everything is now idle
+	l.admit("10.0.1.1", p, true) // trips the prune, then fits
 
 	if l.size() > p.MaxTracked {
 		t.Fatalf("tracked %d after prune, cap is %d", l.size(), p.MaxTracked)
@@ -276,7 +276,7 @@ func TestConcurrentAdmitIsRaceFree(t *testing.T) {
 	for i := range 8 {
 		wg.Go(func() {
 			for range 100 {
-				l.admit("10.0.0."+strconv.Itoa(i%3), p)
+				l.admit("10.0.0."+strconv.Itoa(i%3), p, true)
 			}
 		})
 	}
@@ -933,7 +933,7 @@ func TestSubnetTierOffByDefault(t *testing.T) {
 
 	// Twelve different addresses in one /24, well past any subnet ceiling.
 	for i := range 12 {
-		if !l.admitBoth("10.0.0."+strconv.Itoa(i), p).Allowed {
+		if !l.admitBoth("10.0.0."+strconv.Itoa(i), p, true).Allowed {
 			t.Fatal("the subnet tier acted while SubnetMaxPerWindow was 0")
 		}
 	}
@@ -950,7 +950,7 @@ func TestSubnetTierCatchesRotationThroughABlock(t *testing.T) {
 
 	allowed := 0
 	for i := range 12 {
-		if l.admitBoth("5.252.83."+strconv.Itoa(i), p).Allowed {
+		if l.admitBoth("5.252.83."+strconv.Itoa(i), p, true).Allowed {
 			allowed++
 		}
 	}
@@ -964,12 +964,12 @@ func TestSubnetTierLeavesOtherBlocksAlone(t *testing.T) {
 	p := testProfile()
 	p.SubnetMaxPerWindow = 2
 
-	l.admitBoth("5.252.83.1", p)
-	l.admitBoth("5.252.83.2", p)
-	if l.admitBoth("5.252.83.3", p).Allowed {
+	l.admitBoth("5.252.83.1", p, true)
+	l.admitBoth("5.252.83.2", p, true)
+	if l.admitBoth("5.252.83.3", p, true).Allowed {
 		t.Fatal("the exhausted block still admitted a third address")
 	}
-	if !l.admitBoth("45.133.173.1", p).Allowed {
+	if !l.admitBoth("45.133.173.1", p, true).Allowed {
 		t.Fatal("one block's ceiling refused a source from a different block")
 	}
 }
@@ -984,14 +984,14 @@ func TestSubnetTierNeverBans(t *testing.T) {
 
 	for range 5 { // five bad windows in a row for the block
 		for i := range 6 {
-			if v := l.admitBoth("5.252.83."+strconv.Itoa(i), p); v.Banned {
+			if v := l.admitBoth("5.252.83."+strconv.Itoa(i), p, true); v.Banned {
 				t.Fatal("the subnet tier issued a ban; a shared block must only be throttled")
 			}
 		}
 		c.advance(1100 * time.Millisecond)
 	}
 	// And the block is serving again immediately in a fresh window.
-	if !l.admitBoth("5.252.83.99", p).Allowed {
+	if !l.admitBoth("5.252.83.99", p, true).Allowed {
 		t.Fatal("the block was still refused in a new window, so something banned it")
 	}
 }
@@ -1004,10 +1004,10 @@ func TestSubnetRefusalDoesNotCountAgainstTheSource(t *testing.T) {
 	p.MaxPerWindow = 3
 	p.SubnetMaxPerWindow = 1
 
-	l.admitBoth("5.252.83.1", p) // uses up the block's budget
+	l.admitBoth("5.252.83.1", p, true) // uses up the block's budget
 
 	// This address has never been seen; the block is what refuses it.
-	if v := l.admitBoth("5.252.83.2", p); v.Allowed {
+	if v := l.admitBoth("5.252.83.2", p, true); v.Allowed {
 		t.Fatal("block ceiling did not apply")
 	}
 	// Its own counter must still be untouched: raise the block ceiling and it
@@ -1023,8 +1023,8 @@ func TestSubnetRefusalIsReported(t *testing.T) {
 	p := testProfile()
 	p.SubnetMaxPerWindow = 1
 
-	l.admitBoth("5.252.83.1", p)
-	v := l.admitBoth("5.252.83.2", p)
+	l.admitBoth("5.252.83.1", p, true)
+	v := l.admitBoth("5.252.83.2", p, true)
 	if v.Allowed || v.Reason != "rate limit (subnet)" {
 		t.Fatalf("verdict = %+v, want a refusal naming the subnet tier", v)
 	}
