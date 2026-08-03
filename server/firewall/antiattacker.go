@@ -629,6 +629,9 @@ type limiter struct {
 	mu       sync.Mutex
 	trackers map[string]*tracker
 	nowMs    func() int64
+	// onBan is told about each ban so it can also be carried out outside this
+	// process. Never called with the lock held: it may talk to the kernel.
+	onBan func(key string, ttl time.Duration)
 }
 
 func newLimiter(nowMs func() int64) *limiter {
@@ -636,6 +639,13 @@ func newLimiter(nowMs func() int64) *limiter {
 		nowMs = func() int64 { return time.Now().UnixMilli() }
 	}
 	return &limiter{trackers: make(map[string]*tracker), nowMs: nowMs}
+}
+
+// onBan, when set, is told about every ban this ledger hands out, so it can be
+// carried out somewhere else as well - see Firewall.noteBan. Set once at
+// construction and never while admissions are running.
+func (l *limiter) reportBansTo(fn func(key string, ttl time.Duration)) {
+	l.onBan = fn
 }
 
 // admit records one attempt from key and says whether it may proceed.
@@ -655,6 +665,15 @@ func (l *limiter) admit(key string, p RateProfile, banning bool) Verdict {
 		return verdictAllow
 	}
 	now := l.nowMs()
+
+	// Registered before the unlock so it runs after it: onBan may talk to the
+	// kernel, which is not something to do holding the ledger's lock.
+	var banned time.Duration
+	defer func() {
+		if banned > 0 && l.onBan != nil {
+			l.onBan(key, banned)
+		}
+	}()
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -720,6 +739,7 @@ func (l *limiter) admit(key string, p RateProfile, banning bool) Verdict {
 		if banning && t.violations >= p.BanViolations {
 			t.bannedUntil = now + int64(p.BanSeconds)*1000
 			t.violations = 0
+			banned = time.Duration(p.BanSeconds) * time.Second
 			return Verdict{
 				Banned:     true,
 				RetryAfter: time.Duration(p.BanSeconds) * time.Second,
@@ -887,6 +907,7 @@ type strikeStore struct {
 	mu      sync.Mutex
 	entries map[string]*strikeEntry
 	nowMs   func() int64
+	onBan   func(key string, ttl time.Duration)
 }
 
 type strikeEntry struct {
@@ -901,6 +922,10 @@ func newStrikeStore(nowMs func() int64) *strikeStore {
 		nowMs = func() int64 { return time.Now().UnixMilli() }
 	}
 	return &strikeStore{entries: make(map[string]*strikeEntry), nowMs: nowMs}
+}
+
+func (s *strikeStore) reportBansTo(fn func(key string, ttl time.Duration)) {
+	s.onBan = fn
 }
 
 // strikeKind names which counter an event feeds.
@@ -928,6 +953,14 @@ func (s *strikeStore) add(key string, kind strikeKind, c StrikeConfig) {
 	}
 	now := s.nowMs()
 
+	// Same ordering as limiter.admit: after the unlock, not during it.
+	var banned time.Duration
+	defer func() {
+		if banned > 0 && s.onBan != nil {
+			s.onBan(key, banned)
+		}
+	}()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -954,12 +987,14 @@ func (s *strikeStore) add(key string, kind strikeKind, c StrikeConfig) {
 		if e.empty >= limit {
 			e.bannedUntil = now + int64(c.BanSeconds)*1000
 			e.empty = 0
+			banned = time.Duration(c.BanSeconds) * time.Second
 		}
 	} else {
 		e.protocol++
 		if e.protocol >= limit {
 			e.bannedUntil = now + int64(c.BanSeconds)*1000
 			e.protocol = 0
+			banned = time.Duration(c.BanSeconds) * time.Second
 		}
 	}
 }

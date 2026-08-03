@@ -334,6 +334,7 @@ type state struct {
 	Provider         ProviderConfig     `json:"provider"`
 	AntiAttacker     AntiAttackerConfig `json:"antiAttacker"`
 	DomainRefreshSec int                `json:"domainRefreshSec,omitempty"`
+	KernelBan        KernelBanConfig    `json:"kernelBan"`
 }
 
 // Config is the whole of what the firewall is told, and the whole of what it
@@ -359,6 +360,9 @@ type Config struct {
 	// DomainRefreshSec is how often a rule that names a domain looks the name
 	// up again. Zero uses defaultDomainRefreshSec.
 	DomainRefreshSec int `json:"domainRefreshSec,omitempty"`
+	// KernelBan asks the host firewall to drop a banned source's packets. Off
+	// by default; see KernelBanConfig.
+	KernelBan KernelBanConfig `json:"kernelBan"`
 }
 
 type repEntry struct {
@@ -429,6 +433,11 @@ type Firewall struct {
 	// monitors aggregate what each surface decided, so a flood costs a line
 	// every few seconds instead of one per connection.
 	monitors map[Surface]*monitor
+
+	// banCfg is kept verbatim so the config round-trips; banSink is the live
+	// backend it selected, never nil once New has run.
+	banCfg  KernelBanConfig
+	banSink banSink
 }
 
 // New loads firewall state from path and starts a background expiry sweeper.
@@ -455,6 +464,13 @@ func New(path string) (*Firewall, error) {
 		monitors:    make(map[Surface]*monitor, len(surfaces)),
 	}
 	f.domains = newDomainResolver(f.nowMsFn)
+	f.banSink = noopSink{}
+	f.ctlLimiter.reportBansTo(f.noteBan)
+	f.tcpLimiter.reportBansTo(f.noteBan)
+	f.httpLimiter.reportBansTo(f.noteBan)
+	f.webLimiter.reportBansTo(f.noteBan)
+	f.sshLimiter.reportBansTo(f.noteBan)
+	f.strikes.reportBansTo(f.noteBan)
 	for _, s := range surfaces {
 		f.monitors[s] = newMonitor(string(s))
 	}
@@ -473,6 +489,7 @@ func New(path string) (*Firewall, error) {
 		f.provider = s.Provider
 		f.aa = s.AntiAttacker
 		f.domainRefreshSec = s.DomainRefreshSec
+		f.banCfg = s.KernelBan
 	case os.IsNotExist(err):
 	default:
 		return nil, err
@@ -485,6 +502,7 @@ func New(path string) (*Firewall, error) {
 	f.buildClientLocked()
 	f.applyAntiAttackerLocked(f.aa)
 	f.domains.setHosts(ruleHosts(f.rules), f.domainRefreshSec)
+	f.banSink = newBanSink(f.banCfg)
 	_ = f.saveLocked()
 	f.mu.Unlock()
 
@@ -804,6 +822,7 @@ func (f *Firewall) Snapshot() Config {
 		Enabled: f.enabled, ControlPort: f.controlPort, WebPort: f.webPort,
 		Default: f.def, Rules: plainRules(f.rules), Provider: f.provider,
 		AntiAttacker: f.aa, DomainRefreshSec: f.domainRefreshSec,
+		KernelBan: f.banCfg,
 	}
 }
 
@@ -839,6 +858,7 @@ func (f *Firewall) SetConfig(c Config) error {
 	f.applyAntiAttackerLocked(c.AntiAttacker)
 	f.domainRefreshSec = c.DomainRefreshSec
 	f.domains.setHosts(ruleHosts(f.rules), f.domainRefreshSec)
+	f.applyKernelBanLocked(c.KernelBan)
 	f.repMu.Lock()
 	f.repCache = make(map[string]repEntry)
 	f.repMu.Unlock()
@@ -1366,6 +1386,7 @@ func (f *Firewall) saveLocked() error {
 		Enabled: &enabled, ControlPort: f.controlPort, WebPort: f.webPort,
 		Default: f.def, Rules: plainRules(f.rules), Provider: f.provider,
 		AntiAttacker: f.aa, DomainRefreshSec: f.domainRefreshSec,
+		KernelBan: f.banCfg,
 	}
 	if s.Rules == nil {
 		s.Rules = []Rule{}

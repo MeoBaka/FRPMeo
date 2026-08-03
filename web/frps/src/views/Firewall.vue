@@ -49,6 +49,38 @@
       </div>
     </el-card>
 
+    <!-- Kernel ban -->
+    <el-card class="section" shadow="never">
+      <div class="bar" style="justify-content:space-between">
+        <div class="card-title" style="margin:0">Drop banned sources in the kernel</div>
+        <el-switch v-model="snap.kernelBan.enabled" @change="save" />
+      </div>
+      <p class="hint">
+        Everything else on this page makes refusing cheap. This makes it free:
+        a banned source's packets die in the kernel and never become an accepted
+        socket, a goroutine and a lookup. On a small VPS that is the difference
+        between a flood costing something and costing nothing.
+      </p>
+      <p class="hint" style="margin-top:8px">
+        Linux only, and it needs ipset, iptables and CAP_NET_ADMIN. Missing any
+        of those is not an error - frps says so once at startup and keeps
+        enforcing bans by itself. Who is banned never changes either way; this
+        only moves where the packet dies, so the switch is safe to flip while
+        running. Turning it off takes frps back out of the host firewall.
+      </p>
+      <div class="bar" style="margin-top:12px" v-if="snap.kernelBan.enabled">
+        <label class="lbl">Backend</label>
+        <el-select v-model="snap.kernelBan.backend" class="w220" @change="save">
+          <el-option label="Auto - use what the host offers" value="auto" />
+          <el-option label="ipset (require it)" value="ipset" />
+        </el-select>
+        <span class="hint">
+          Requiring it only changes how loudly frps complains when it is not
+          there; it never stops frps from starting.
+        </span>
+      </div>
+    </el-card>
+
     <!-- Reputation provider -->
     <el-card class="section" shadow="never">
       <div class="card-title">Blacklist provider (for unknown IPs)</div>
@@ -661,9 +693,12 @@ interface FwStatus {
   underAttack: boolean; inGrace: boolean
   tracked: Record<string, number>; trusted: number; openConns: number; bans: BanEntry[]
 }
+interface KernelBan { enabled: boolean; backend: string }
+
 interface Snap {
   enabled: boolean; controlPort: boolean; webPort: boolean; default: string
   rules: Rule[]; provider: Provider; antiAttacker: AntiAttacker; domainRefreshSec: number
+  kernelBan: KernelBan
 }
 
 function defProvider(): Provider {
@@ -738,7 +773,7 @@ async function clearBans() {
     ElMessage.error('Failed: ' + (e.message || e))
   }
 }
-const snap = reactive<Snap>({ enabled: true, controlPort: false, webPort: false, default: 'allow', rules: [], provider: defProvider(), antiAttacker: defAntiAttacker(), domainRefreshSec: 60 })
+const snap = reactive<Snap>({ enabled: true, controlPort: false, webPort: false, default: 'allow', rules: [], provider: defProvider(), antiAttacker: defAntiAttacker(), domainRefreshSec: 60, kernelBan: { enabled: false, backend: 'auto' } })
 
 // What each domain named by a rule resolves to, keyed by name so the rules
 // table can show it under the rule that named it.
@@ -811,6 +846,7 @@ async function load() {
     if (!snap.provider.mode) snap.provider.mode = 'off'
     if (!snap.provider.headers) snap.provider.headers = {}
     snap.domainRefreshSec = s.domainRefreshSec || 60
+    snap.kernelBan = { enabled: !!s.kernelBan?.enabled, backend: s.kernelBan?.backend || 'auto' }
     const aaDef = defAntiAttacker()
     const aa = s.antiAttacker || ({} as AntiAttacker)
     snap.antiAttacker = {
@@ -838,7 +874,7 @@ async function load() {
 async function persist(okMsg: string) {
   saving.value = true
   try {
-    await http.put('../api/firewall', { enabled: snap.enabled, controlPort: snap.controlPort, webPort: snap.webPort, default: snap.default, rules: snap.rules, provider: snap.provider, antiAttacker: snap.antiAttacker, domainRefreshSec: snap.domainRefreshSec })
+    await http.put('../api/firewall', { enabled: snap.enabled, controlPort: snap.controlPort, webPort: snap.webPort, default: snap.default, rules: snap.rules, provider: snap.provider, antiAttacker: snap.antiAttacker, domainRefreshSec: snap.domainRefreshSec, kernelBan: snap.kernelBan })
     ElMessage.success(okMsg)
     return true
   } catch (e: any) {

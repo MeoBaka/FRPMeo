@@ -732,6 +732,14 @@ func (svr *Service) Close() error {
 		svr.sshTunnelGateway.Close()
 	}
 
+	// Takes frps back out of the host firewall, if it ever put itself in.
+	// Addresses left in a kernel set would outlive the bans that put them
+	// there, blocked with nothing left running to explain why.
+
+	if svr.rc.Firewall != nil {
+		svr.rc.Firewall.CloseKernelBan()
+	}
+
 	svr.rc.Close()
 
 	svr.muxer.Close()
