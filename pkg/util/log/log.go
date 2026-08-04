@@ -62,14 +62,22 @@ func InitLogger(logPath string, levelStr string, maxDays int, disableLogColor bo
 	options := []log.Option{}
 
 	if logPath == "console" {
-		if !disableLogColor {
-			options = append(options,
+		// Asked for, and usable. The config switch turns color off; the check
+		// answers whether turning it on would produce color at all, which it
+		// does not when the output is a file, a pipe, or a Windows console
+		// without virtual terminal processing. Both have to agree, because
+		// escapes written where nothing interprets them are worse than no
+		// color: they are stored verbatim and every later reader sees
+		// `[1;34m` in front of every line.
+		colorful := !disableLogColor && colorUsable(os.Stdout)
 
-				log.WithOutput(log.NewConsoleWriter(log.ConsoleConfig{
-					Colorful: true,
-				}, os.Stdout)),
-			)
-		}
+		options = append(options,
+
+			log.WithOutput(log.NewConsoleWriter(log.ConsoleConfig{
+				Colorful: colorful,
+			}, os.Stdout)),
+		)
+
 	} else {
 
 		writer := log.NewRotateFileWriter(log.RotateFileConfig{
