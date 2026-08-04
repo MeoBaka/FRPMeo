@@ -552,21 +552,29 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 
 // newAdmitFilter builds the admission predicate for the paths that bypass
 
-// handleUserTCPConnection: the firewall first, then the NewUserConn plugin
+// handleUserTCPConnection: the NewUserConn plugin hook. Returns nil when no
 
-// hook. Returns nil when neither is configured, so those paths pay nothing.
+// such plugin is configured, so those paths pay nothing.
+
+//
+
+// The rate limit is not part of this. It counts per source and per packet on
+
+// the udp path, which a cached per-address verdict would defeat; those paths
+
+// call AdmitUDP directly instead.
 
 //
 
 // A non-zero ttl caches the verdict per source address. That is sound rather
 
-// than a shortcut: both stages only ever see the source, the proxy and its
+// than a shortcut: the hook only ever sees the source, the proxy and its
 
 // owner, so asking twice about the same source cannot produce a different
 
-// answer. The cost is that a rule change takes up to ttl to reach traffic
+// answer. The cost is that a plugin changing its mind takes up to ttl to reach
 
-// already flowing.
+// traffic already flowing.
 
 // what names the kind of traffic in log lines, "conn" or "udp". The proxy name
 
@@ -575,13 +583,11 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 func (pxy *BaseProxy) newAdmitFilter(what string, port int, ttl time.Duration) func(string) bool {
 	rc := pxy.GetResourceController()
 
-	fw := rc.Firewall
-
 	pm := rc.PluginManager
 
 	hookPlugins := pm != nil && pm.HasNewUserConnPlugins()
 
-	if fw == nil && !hookPlugins {
+	if !hookPlugins {
 		return nil
 	}
 
@@ -592,16 +598,6 @@ func (pxy *BaseProxy) newAdmitFilter(what string, port int, ttl time.Duration) f
 	proxyType := pxy.configurer.GetBaseConfig().Type
 
 	check := func(remoteAddr string) bool {
-		if fw != nil {
-			ok, reason := fw.Allow(remoteAddr, port)
-
-			fw.NoteDecision(firewall.SurfaceProxy, ok, reason, remoteAddr)
-
-			if !ok {
-				return false
-			}
-		}
-
 		// Skipped for frps reaching a plugin published through one of our own
 
 		// proxies, which would otherwise have the hook call itself.
@@ -686,20 +682,14 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 	remoteAddr := userConn.RemoteAddr().String()
 
-	// The frps-side port the user dialed: what a firewall rule matches on, and
+	// The frps-side port the user dialed: what tells us a connection is frps
 
-	// what tells us a connection is frps reaching its own machinery.
+	// reaching its own machinery.
 
 	dstPort := addrPort(userConn.LocalAddr())
 
-	// Admission runs in the same order here as on the http and udp paths -
-	// rules, then the rate limit - and both come before the plugin content is
-	// built below, so a refusal costs no allocation.
-	//
-	// Rules first because they are about identity and are the cheaper question:
-	// a source already on a deny list should not get as far as occupying a slot
-	// in the rate limiter's table, which under a flood is the table an attacker
-	// would otherwise be filling for free.
+	// Admission comes before the plugin content is built below, so a refusal
+	// costs no allocation.
 	//
 	// Every refusal here closes with RST rather than a graceful FIN, so nothing
 	// is left in TIME_WAIT - the deferred Close above does the closing, this
@@ -707,20 +697,9 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 	if fw := rc.Firewall; fw != nil {
 
-		// Decisions are counted by the firewall's own reporter rather than
+		// Decisions are counted by the monitor's own reporter rather than
 		// logged one per connection: a rejection here is common enough that a
 		// line each turns a flood into a second flood against the disk.
-
-		ok, reason := fw.Allow(remoteAddr, dstPort)
-		if !ok {
-
-			fw.NoteDecision(firewall.SurfaceProxy, false, reason, remoteAddr)
-
-			netpkg.ArmReset(userConn)
-
-			return
-
-		}
 
 		// Rate limiting is skipped for the visitor-authenticated types, which
 		// proved a shared secret to get here - see
@@ -756,7 +735,7 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 		}
 
-		fw.NoteDecision(firewall.SurfaceProxy, true, reason, remoteAddr)
+		fw.NoteDecision(firewall.SurfaceProxy, true, "rate ok", remoteAddr)
 	}
 
 	// Announced here rather than in the accept loop, so the line means the

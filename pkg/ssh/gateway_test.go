@@ -41,9 +41,9 @@ func TestGatewayAsksBeforeTheHandshake(t *testing.T) {
 			var asked atomic.Int32
 			g, err := NewGateway(v1.SSHTunnelGateway{BindPort: 0}, "127.0.0.1",
 				netpkg.NewInternalListener(),
-				func(_ string, _ int) (bool, string) {
+				func(_ string) (bool, string) {
 					asked.Add(1)
-					return tc.allow, "rule test"
+					return tc.allow, "rate test"
 				})
 			if err != nil {
 				t.Fatalf("new gateway: %v", err)

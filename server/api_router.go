@@ -71,15 +71,13 @@ func (svr *Service) registerRouteHandlers(helper *httppkg.RouterRegisterHelper) 
 
 	subRouter.HandleFunc("/api/proxies", httppkg.MakeHTTPHandlerFunc(apiController.DeleteProxies)).Methods("DELETE")
 
-	// native firewall (dashboard, behind basic auth)
+	// anti-bot layer (dashboard, behind basic auth)
 
 	subRouter.HandleFunc("/api/firewall", svr.apiFirewallGet).Methods("GET")
 
 	subRouter.HandleFunc("/api/firewall", svr.apiFirewallPut).Methods("PUT")
 
 	subRouter.HandleFunc("/api/firewall/status", svr.apiFirewallStatusGet).Methods("GET")
-
-	subRouter.HandleFunc("/api/firewall/domains", svr.apiFirewallDomainsGet).Methods("GET")
 
 	subRouter.HandleFunc("/api/firewall/bans", svr.apiFirewallBansDelete).Methods("DELETE")
 

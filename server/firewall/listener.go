@@ -16,38 +16,29 @@ package firewall
 
 import (
 	"net"
-	"strconv"
 	"sync"
 
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
 
-// maxPendingAdmissions bounds how many connections may be waiting on a firewall
-// decision at once.
+// maxPendingAdmissions bounds how many connections may be waiting on a decision
+// at once.
 //
-// The decision is usually a handful of map lookups, but not always: with a
-// blocking reputation provider configured it is an http round trip. Running
-// that inline in the accept loop would let one slow lookup hold up every other
-// client, so admissions run concurrently - and the bound is what stops that
-// from becoming one goroutine per connection under a flood.
+// The decision is a handful of map lookups, so it is normally over before the
+// next connection arrives. The bound is what keeps a flood from turning that
+// into one goroutine per connection anyway.
 //
 // At the limit connections are refused outright rather than queued. Turning
 // somebody away quickly is the better answer when the work behind the queue is
 // already not keeping up.
 const maxPendingAdmissions = 2048
 
-// guardedListener is a net.Listener that only yields connections the firewall
+// guardedListener is a net.Listener that only yields connections the rate limit
 // has agreed to.
 type guardedListener struct {
 	net.Listener
 
 	fw *Firewall
-
-	// rules and rate select which halves of the control decision run here. They
-	// are separable because a port shared with vhost traffic can only have one
-	// of them applied at accept - see GuardControlRules.
-	rules bool
-	rate  bool
 
 	// admitted carries the connections that passed. Unbuffered on purpose:
 	// whoever reads this listener accepts in a tight loop, so it is always
@@ -63,8 +54,8 @@ type guardedListener struct {
 	err  error
 }
 
-// GuardControl wraps ln so the firewall decides on every connection before the
-// caller - or anything else - reads a byte from it.
+// GuardControl wraps ln so the control rate limit decides on every connection
+// before the caller - or anything else - reads a byte from it.
 //
 // This ordering is the whole point, not a detail. On the control port the raw
 // socket is not handed to its accept loop directly: it goes to a protocol
@@ -73,12 +64,12 @@ type guardedListener struct {
 // That read waits up to ten seconds, on a goroutine the multiplexer spawns per
 // connection without a bound.
 //
-// A firewall placed downstream of that never sees the connections worth
-// stopping. A peer that opens a socket and then sends fewer bytes than the
-// longest matcher needs is parked in the multiplexer for the whole timeout and
-// dropped there - having cost a goroutine, a descriptor and a buffer, and
-// having been asked nothing. That is the cheapest flood there is, and it is
-// exactly what the anti-attack layer exists for.
+// A check placed downstream of that never sees the connections worth stopping.
+// A peer that opens a socket and then sends fewer bytes than the longest
+// matcher needs is parked in the multiplexer for the whole timeout and dropped
+// there - having cost a goroutine, a descriptor and a buffer, and having been
+// asked nothing. That is the cheapest flood there is, and it is exactly what
+// this layer exists for.
 //
 // It is also the only place a refusal can be a reset. Once the multiplexer has
 // wrapped the connection to replay the bytes it read, the socket underneath is
@@ -86,48 +77,16 @@ type guardedListener struct {
 // back to a graceful close and leave frps holding TIME_WAIT - kernel state
 // proportional to the attack, accumulating on the side doing the refusing.
 //
-// Decisions are made in the same order as everywhere else: manual rules and
-// reputation first, then the rate limit.
-//
-// For a listener that carries client control traffic and nothing else.
+// Only for a listener that carries client control traffic. A port frps shares
+// between control traffic and the vhost muxers must not be wrapped here:
+// visitors to a tunneled site land on the same socket as frpc, and charging
+// them against the control profile - a limit sized for how often a client
+// reconnects - would throttle the site. There the wrapper goes on the control
+// listeners the multiplexer produces instead, once the protocol is known.
 func (f *Firewall) GuardControl(ln net.Listener) net.Listener {
-	return f.guard(ln, true, true)
-}
-
-// GuardControlRules installs only the first half of GuardControl's decision:
-// the manual rules and the reputation provider, which judge an address and so
-// are right for any traffic that arrives.
-//
-// For a port frps shares between client control traffic and the vhost muxers.
-// There, visitors to a tunneled site land on the same socket as frpc, and
-// which of the two a connection is cannot be known until the multiplexer has
-// read its opening bytes. Charging a website's visitors against the control
-// profile - a limit sized for how often a client reconnects - would throttle
-// the site, so the rate limit waits until the protocol is known and goes on the
-// control listeners the multiplexer produces, via GuardControlRate.
-//
-// The cheapest flood is not stopped as early on such a port. That is the cost
-// of the configuration rather than of this: a decision that depends on reading
-// the connection cannot be made before it.
-func (f *Firewall) GuardControlRules(ln net.Listener) net.Listener {
-	return f.guard(ln, true, false)
-}
-
-// GuardControlRate installs only the second half: the control rate limit.
-//
-// The other side of the split GuardControlRules describes - it goes on the
-// listeners a multiplexer has already sorted, where the traffic is known to be
-// a client rather than a visitor.
-func (f *Firewall) GuardControlRate(ln net.Listener) net.Listener {
-	return f.guard(ln, false, true)
-}
-
-func (f *Firewall) guard(ln net.Listener, rules, rate bool) net.Listener {
 	g := &guardedListener{
 		Listener: ln,
 		fw:       f,
-		rules:    rules,
-		rate:     rate,
 		admitted: make(chan net.Conn),
 		done:     make(chan struct{}),
 	}
@@ -175,7 +134,8 @@ func (g *guardedListener) serve() {
 	}
 }
 
-// decide runs the firewall over one connection and reports whether it may stay.
+// decide runs the control rate limit over one connection and reports whether it
+// may stay.
 //
 // Both outcomes go to the monitor rather than to a log line of their own. Every
 // decision is counted either way: refusals alone cannot tell a flood being
@@ -185,28 +145,12 @@ func (g *guardedListener) serve() {
 func (g *guardedListener) decide(c net.Conn) bool {
 	remote := c.RemoteAddr().String()
 
-	// Set by the rules half, or naming its absence: on a shared port the rules
-	// ran at accept and only the rate limit is left here.
-	verdict := "rules applied upstream"
-
-	if g.rules {
-		ok, reason := g.fw.AllowControl(remote, listenPort(c.LocalAddr()))
-		if !ok {
-			g.noteDecision(false, reason, remote)
-			return false
-		}
-		verdict = reason
+	if v := g.fw.AdmitControl(remote); !v.Allowed {
+		g.noteDecision(false, v.Reason, remote)
+		return false
 	}
 
-	// Rate limit after the rules, matching the order on the proxy paths.
-	if g.rate {
-		if v := g.fw.AdmitControl(remote); !v.Allowed {
-			g.noteDecision(false, v.Reason, remote)
-			return false
-		}
-	}
-
-	g.noteDecision(true, verdict, remote)
+	g.noteDecision(true, "rate ok", remote)
 
 	return true
 }
@@ -248,27 +192,4 @@ func (g *guardedListener) finish(err error) {
 func refuse(c net.Conn) {
 	netpkg.ArmReset(c)
 	c.Close()
-}
-
-// listenPort is the port a connection landed on, which is what a firewall rule
-// names. Returns 0 when the address carries no port.
-func listenPort(addr net.Addr) int {
-	if addr == nil {
-		return 0
-	}
-	switch a := addr.(type) {
-	case *net.TCPAddr:
-		return a.Port
-	case *net.UDPAddr:
-		return a.Port
-	}
-	_, port, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return 0
-	}
-	n, err := strconv.Atoi(port)
-	if err != nil {
-		return 0
-	}
-	return n
 }

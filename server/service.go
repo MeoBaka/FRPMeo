@@ -243,9 +243,9 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		webServer.RouteRegister(svr.registerRouteHandlers)
 	}
 
-	// Native firewall for user-connection access control (rules managed from
+	// Anti-bot layer for user connections (settings managed from the
 
-	// the dashboard, persisted to a JSON file next to frps).
+	// dashboard, persisted to a JSON file next to frps).
 
 	var fwErr error
 
@@ -275,8 +275,6 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 	if webServer != nil && svr.rc.Firewall != nil {
 
-		port := cfg.WebServer.Port
-
 		fw := svr.rc.Firewall
 
 		// The same ceiling the control port applies, in the form net/http
@@ -294,18 +292,8 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		webServer.SetHandshakeByteLimit(fw.HandshakeByteLimit())
 
 		webServer.SetConnFilter(func(remoteAddr string) bool {
-			ok, reason := fw.AllowWeb(remoteAddr, port)
-
-			if !ok {
-				fw.NoteDecision(firewall.SurfaceWeb, false, reason, remoteAddr)
-
-				return false
-			}
-
-			// Rate limit after the rules, as everywhere else. The dashboard is
-			// a login form, so this is the layer that answers password
-			// guessing - rules only know addresses somebody already thought to
-			// list.
+			// The dashboard is a login form, so the rate limit is what answers
+			// password guessing here.
 
 			if v := fw.AdmitWeb(remoteAddr); !v.Allowed {
 				fw.NoteDecision(firewall.SurfaceWeb, false, v.Reason, remoteAddr)
@@ -313,7 +301,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 				return false
 			}
 
-			fw.NoteDecision(firewall.SurfaceWeb, true, reason, remoteAddr)
+			fw.NoteDecision(firewall.SurfaceWeb, true, "rate ok", remoteAddr)
 
 			return true
 		})
@@ -415,25 +403,21 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		return nil, fmt.Errorf("create server listener error, %v", err)
 	}
 
-	// The firewall goes in front of the multiplexer rather than behind it.
+	// The rate limit goes in front of the multiplexer rather than behind it.
 	// Everything the multiplexer hands on has already had its opening bytes
 	// read, under a timeout, on a goroutine spawned per connection without a
 	// bound - so a check placed after it never sees a silent peer at all. See
 	// firewall.GuardControl.
 
-	// Unless the vhost muxers share this port, in which case only the rules can
-	// be decided here: the rest of what arrives is a tunneled site's visitors,
-	// and the control rate limit is not sized for those. It goes on the control
+	// Unless the vhost muxers share this port, in which case nothing can be
+	// decided here: the rest of what arrives is a tunneled site's visitors, and
+	// the control rate limit is not sized for those. It goes on the control
 	// listeners below instead, once the multiplexer has told the two apart.
 
 	sharedWithVhost := httpMuxOn || httpsMuxOn
 
-	if svr.rc.Firewall != nil {
-		if sharedWithVhost {
-			ln = svr.rc.Firewall.GuardControlRules(ln)
-		} else {
-			ln = svr.rc.Firewall.GuardControl(ln)
-		}
+	if svr.rc.Firewall != nil && !sharedWithVhost {
+		ln = svr.rc.Firewall.GuardControl(ln)
 	}
 
 	svr.muxer = mux.NewMux(ln)
@@ -498,36 +482,27 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 	if cfg.SSHTunnelGateway.BindPort > 0 {
 
-		// The gateway opens a port of its own, so it needs the firewall in its
+		// The gateway opens a port of its own, so it needs the rate limit in
 
-		// own hands: connections there never pass through HandleListener.
+		// its own hands: connections there never pass through HandleListener.
 
 		var allowSSH ssh.AllowFunc
 
 		if fw := svr.rc.Firewall; fw != nil {
-			allowSSH = func(remoteAddr string, port int) (bool, string) {
-				ok, reason := fw.AllowControl(remoteAddr, port)
-				if !ok {
-					fw.NoteDecision(firewall.SurfaceSSH, false, reason, remoteAddr)
-
-					// An empty reason asks the gateway not to log this one:
-					// the firewall's own reporter covers it, and under a flood
-					// a line per rejection is a second flood.
-
-					return false, ""
-				}
-
-				// Rate limit after the rules.
-
+			allowSSH = func(remoteAddr string) (bool, string) {
 				if v := fw.AdmitSSH(remoteAddr); !v.Allowed {
 					fw.NoteDecision(firewall.SurfaceSSH, false, v.Reason, remoteAddr)
 
+					// An empty reason asks the gateway not to log this one: the
+					// monitor's own reporter covers it, and under a flood a line
+					// per rejection is a second flood.
+
 					return false, ""
 				}
 
-				fw.NoteDecision(firewall.SurfaceSSH, true, reason, remoteAddr)
+				fw.NoteDecision(firewall.SurfaceSSH, true, "rate ok", remoteAddr)
 
-				return true, reason
+				return true, "rate ok"
 			}
 		}
 
@@ -651,11 +626,11 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 	if sharedWithVhost && svr.rc.Firewall != nil {
 
-		svr.listener = svr.rc.Firewall.GuardControlRate(svr.listener)
+		svr.listener = svr.rc.Firewall.GuardControl(svr.listener)
 
-		svr.websocketListener = svr.rc.Firewall.GuardControlRate(svr.websocketListener)
+		svr.websocketListener = svr.rc.Firewall.GuardControl(svr.websocketListener)
 
-		svr.tlsListener = svr.rc.Firewall.GuardControlRate(svr.tlsListener)
+		svr.tlsListener = svr.rc.Firewall.GuardControl(svr.tlsListener)
 
 	}
 
@@ -1376,26 +1351,15 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 
 		}
 
-		// Native firewall: drop blocked clients before any stream is accepted.
+		// Rate limit: turn a flooding client away before any stream is accepted.
 
 		if fw := svr.rc.Firewall; fw != nil {
 
 			remoteAddr := c.RemoteAddr().String()
 
-			// Same order and the same reporting as the tcp listener, so a
-			// flood over quic is not the one that goes unmentioned. No RST to
-			// arm here - quic closes without leaving TIME_WAIT behind.
-
-			ok, reason := fw.AllowControl(remoteAddr, localPort(c.LocalAddr()))
-			if !ok {
-
-				fw.NoteDecision(firewall.SurfaceControl, false, reason, remoteAddr)
-
-				_ = c.CloseWithError(0, "")
-
-				continue
-
-			}
+			// The same reporting as the tcp listener, so a flood over quic is
+			// not the one that goes unmentioned. No RST to arm here - quic
+			// closes without leaving TIME_WAIT behind.
 
 			if v := fw.AdmitControl(remoteAddr); !v.Allowed {
 
@@ -1407,7 +1371,7 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 
 			}
 
-			fw.NoteDecision(firewall.SurfaceControl, true, reason, remoteAddr)
+			fw.NoteDecision(firewall.SurfaceControl, true, "rate ok", remoteAddr)
 		}
 
 		// Start a new goroutine to handle connection.

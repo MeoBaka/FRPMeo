@@ -15,51 +15,23 @@
 package server
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"strings"
 
 	"github.com/fatedier/frp/server/firewall"
 )
 
-// GET /api/firewall - current firewall config (enabled, default, rules, provider,
-// antiAttacker).
+// GET /api/firewall - current anti-bot config (antiAttacker, kernelBan).
 func (svr *Service) apiFirewallGet(w http.ResponseWriter, _ *http.Request) {
 	apiWriteJSON(w, http.StatusOK, svr.rc.Firewall.Snapshot())
 }
 
-// PUT /api/firewall - replace enabled/controlPort/default/rules/provider/antiAttacker.
+// PUT /api/firewall - replace antiAttacker/kernelBan.
 func (svr *Service) apiFirewallPut(w http.ResponseWriter, r *http.Request) {
 	var body firewall.Config
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
-	}
-	for i := range body.Rules {
-		a := strings.ToLower(body.Rules[i].Action)
-		if a != "allow" && a != "deny" {
-			apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "rule action must be allow or deny"})
-			return
-		}
-		body.Rules[i].Action = a
-		// Reject a bad port spec here rather than let it sit in a rule that
-		// silently never matches.
-		if err := firewall.ParsePortSpec(body.Rules[i].Port); err != nil {
-			apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		// And the target for the same reason. A typo there compiles to a rule
-		// matching nothing: an allow that silently stops covering somebody, or
-		// a deny that silently stops blocking them.
-		if err := firewall.ValidateRuleTarget(body.Rules[i].CIDR); err != nil {
-			apiWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		if body.Rules[i].ID == "" {
-			body.Rules[i].ID = fwRandID()
-		}
 	}
 	if err := svr.rc.Firewall.SetConfig(body); err != nil {
 		apiWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -74,31 +46,15 @@ func apiWriteJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func fwRandID() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// GET /api/firewall/status - what AntiAttacker is doing right now: whether the
-// attack state is on, how many sources each layer is tracking, and who is
-// currently banned.
+// GET /api/firewall/status - what the anti-bot layer is doing right now:
+// whether the attack state is on, how many sources each layer is tracking, and
+// who is currently banned.
 //
 // Separate from the config endpoint because it answers a different question and
 // changes on a different timescale: the settings are edited by hand now and
 // then, this moves every second.
 func (svr *Service) apiFirewallStatusGet(w http.ResponseWriter, _ *http.Request) {
 	apiWriteJSON(w, http.StatusOK, svr.rc.Firewall.AntiAttackerStatus())
-}
-
-// GET /api/firewall/domains - what each domain named by a rule resolves to.
-//
-// A rule naming a name is only as good as its last lookup, and one that has
-// been failing for a day is still matching whatever it resolved to yesterday.
-// That is the right behavior - see domainResolver.refresh - but it has to be
-// visible, or a rule quietly stops meaning what it says.
-func (svr *Service) apiFirewallDomainsGet(w http.ResponseWriter, _ *http.Request) {
-	apiWriteJSON(w, http.StatusOK, svr.rc.Firewall.DomainStatus())
 }
 
 // DELETE /api/firewall/bans - lift every ban and forget every strike.

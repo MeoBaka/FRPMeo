@@ -62,8 +62,6 @@ func banFirewall(t *testing.T) (*Firewall, *recordingSink) {
 		t.Fatalf("new firewall: %v", err)
 	}
 	if err := f.SetConfig(Config{
-		Enabled: true, ControlPort: true, Default: "allow",
-		Provider: ProviderConfig{Mode: "off"},
 		AntiAttacker: AntiAttackerConfig{
 			Enabled: true,
 			Control: ControlProfile{Protect: true, RateProfile: RateProfile{

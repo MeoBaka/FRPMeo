@@ -479,7 +479,7 @@ func TestUDPMaxTrackedStopsGrowth(t *testing.T) {
 }
 
 func TestAdmitUDPOffByDefault(t *testing.T) {
-	f := newTestFirewall(t, nil)
+	f := newTestFirewall(t)
 	for range 100 {
 		if !f.AdmitUDP("1.2.3.4:5000", 9999) {
 			t.Fatal("UDP rate limiting acted while AntiAttacker was off")
@@ -503,7 +503,7 @@ func TestAdmitUDPLimits(t *testing.T) {
 
 func newAAFirewall(t *testing.T, aa AntiAttackerConfig) *Firewall {
 	t.Helper()
-	f := newTestFirewall(t, nil)
+	f := newTestFirewall(t)
 	cfg := f.Snapshot()
 	cfg.AntiAttacker = aa
 	if err := f.SetConfig(cfg); err != nil {
@@ -513,7 +513,7 @@ func newAAFirewall(t *testing.T, aa AntiAttackerConfig) *Firewall {
 }
 
 func TestAdmitTCPOffByDefault(t *testing.T) {
-	f := newTestFirewall(t, nil)
+	f := newTestFirewall(t)
 	for range 50 {
 		if v := f.AdmitTCP("1.2.3.4:1000"); !v.Allowed {
 			t.Fatal("rate limiting acted while AntiAttacker was off")
@@ -567,41 +567,17 @@ func TestAdmitHTTPLimitsAndReportsRetryAfter(t *testing.T) {
 	}
 }
 
-func TestAdmitHTTPUsesXFFOnlyFromTrustedProxy(t *testing.T) {
+// X-Forwarded-For is never believed. There is nothing left that says which
+// peers are trusted proxies, so honouring the header would let anyone split
+// themselves into as many sources as they cared to invent - which does not
+// weaken the limit so much as remove it.
+func TestAdmitHTTPIgnoresXFF(t *testing.T) {
 	base := RateProfile{Enabled: true, WindowMs: 60000, MaxPerWindow: 1, BanViolations: 99}
 
-	// Untrusted: both requests count against the one socket address.
 	f := newAAFirewall(t, AntiAttackerConfig{Enabled: true, HTTP: HTTPProfile{RateProfile: base}})
 	f.AdmitHTTP("9.9.9.9:1000", "1.1.1.1")
 	if v := f.AdmitHTTP("9.9.9.9:1000", "2.2.2.2"); v.Allowed {
-		t.Fatal("a spoofed X-Forwarded-For split one source into two without a trusted list")
-	}
-
-	// A trusted allow rule naming the proxy: they are different clients and
-	// both get their first request.
-	f2 := newAAFirewall(t, AntiAttackerConfig{Enabled: true, HTTP: HTTPProfile{RateProfile: base}})
-	cfg := f2.Snapshot()
-	cfg.Rules = []Rule{{ID: "lb", Action: "allow", CIDR: "9.9.9.9", Port: "all", Trusted: true}}
-	if err := f2.SetConfig(cfg); err != nil {
-		t.Fatalf("set config: %v", err)
-	}
-	f2.AdmitHTTP("9.9.9.9:1000", "1.1.1.1")
-	if v := f2.AdmitHTTP("9.9.9.9:1000", "2.2.2.2"); !v.Allowed {
-		t.Fatal("two clients behind a trusted proxy were counted as one")
-	}
-
-	// And a plain allow rule must not be enough. Believing the header from any
-	// peer an allow rule covers would let a broad rule hand it to everyone,
-	// which does not weaken the limit so much as remove it.
-	f3 := newAAFirewall(t, AntiAttackerConfig{Enabled: true, HTTP: HTTPProfile{RateProfile: base}})
-	cfg3 := f3.Snapshot()
-	cfg3.Rules = []Rule{{ID: "plain", Action: "allow", CIDR: "9.9.9.9", Port: "all"}}
-	if err := f3.SetConfig(cfg3); err != nil {
-		t.Fatalf("set config: %v", err)
-	}
-	f3.AdmitHTTP("9.9.9.9:1000", "1.1.1.1")
-	if v := f3.AdmitHTTP("9.9.9.9:1000", "2.2.2.2"); v.Allowed {
-		t.Fatal("a plain allow rule was enough to believe X-Forwarded-For")
+		t.Fatal("a spoofed X-Forwarded-For split one source into two")
 	}
 }
 
@@ -649,12 +625,10 @@ func TestAntiAttackerSurvivesReload(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 	cfg := f.Snapshot()
-	cfg.Enabled = true
 	cfg.AntiAttacker = AntiAttackerConfig{
 		Enabled: true,
 		TCP:     RateProfile{Enabled: true, MaxPerWindow: 7},
 	}
-	cfg.Rules = []Rule{{ID: "lb", Action: "allow", CIDR: "10.0.0.0/8", Port: "all", Trusted: true}}
 	if err := f.SetConfig(cfg); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
@@ -663,23 +637,19 @@ func TestAntiAttackerSurvivesReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	snap := f2.Snapshot()
-	got := snap.AntiAttacker
+	got := f2.Snapshot().AntiAttacker
 	if !got.Enabled {
 		t.Fatalf("antiAttacker did not survive the reload: %+v", got)
 	}
 	if got.TCP.MaxPerWindow != 7 {
 		t.Fatalf("TCP.MaxPerWindow = %d, want 7", got.TCP.MaxPerWindow)
 	}
-	if len(snap.Rules) != 1 || !snap.Rules[0].Trusted {
-		t.Fatalf("the trusted rule did not survive the reload: %+v", snap.Rules)
-	}
 }
 
 // --- control port ---
 
 func TestAdmitControlOffByDefault(t *testing.T) {
-	f := newTestFirewall(t, nil)
+	f := newTestFirewall(t)
 	for range 500 {
 		if !f.AdmitControl("1.2.3.4:1000").Allowed {
 			t.Fatal("the control port was rate limited while AntiAttacker was off")
@@ -753,7 +723,7 @@ func TestControlProfileDefaultIsLooserThanTCP(t *testing.T) {
 // --- dashboard and ssh gateway ---
 
 func TestAdmitWebAndSSHOffByDefault(t *testing.T) {
-	f := newTestFirewall(t, nil)
+	f := newTestFirewall(t)
 	for range 200 {
 		if !f.AdmitWeb("1.2.3.4:1000").Allowed {
 			t.Fatal("the dashboard was rate limited while AntiAttacker was off")

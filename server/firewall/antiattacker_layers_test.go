@@ -349,7 +349,7 @@ func TestStatusHidesAggregateBuckets(t *testing.T) {
 }
 
 func TestStatusIsEmptyWhenDisabled(t *testing.T) {
-	f := newTestFirewall(t, nil)
+	f := newTestFirewall(t)
 	st := f.AntiAttackerStatus()
 	if st.UnderAttack || len(st.Bans) != 0 {
 		t.Fatalf("status = %+v, want nothing reported while AntiAttacker is off", st)
@@ -476,13 +476,13 @@ func TestTrustedSourceIsNotHalved(t *testing.T) {
 		Control: ControlProfile{Protect: true, RateProfile: RateProfile{
 			WindowMs: 60000, MaxPerWindow: 2, BanViolations: 99,
 		}},
+		Trust:   TrustConfig{Enabled: true, AfterMs: 1000, MinBytes: 4096, ForSeconds: 86400, MaxTracked: 100},
 		Strikes: StrikeConfig{Enabled: true, ProtocolFailures: 3, BanSeconds: 60, ForgetMs: 300000, MaxTracked: 100},
 	})
-	cfg := f.Snapshot()
-	cfg.Rules = []Rule{{ID: "office", Action: "allow", CIDR: "1.2.3.4", Port: "all", Trusted: true}}
-	if err := f.SetConfig(cfg); err != nil {
-		t.Fatalf("set config: %v", err)
-	}
+
+	// Earned the hard way: one connection that lasted and carried real traffic.
+	f.NoteConnectionClosed("1.2.3.4:1000", 5*time.Second, 1<<20)
+
 	f.ReportProtocolFailure("1.2.3.4:1000")
 
 	for range 20 {

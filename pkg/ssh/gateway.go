@@ -43,15 +43,9 @@ import (
 
 // AllowFunc decides whether a peer may open an ssh connection at all. It is
 
-// handed in rather than reached for: the firewall lives in the server, and the
+// handed in rather than reached for: the anti-bot layer lives in the server,
 
-// gateway has no business knowing about it.
-
-//
-
-// remoteAddr is the peer, port the gateway port it arrived on, so a rule can
-
-// name that port like any other.
+// and the gateway has no business knowing about it.
 
 //
 
@@ -61,7 +55,7 @@ import (
 
 // turn a flood being refused into a flood of its own against the disk.
 
-type AllowFunc func(remoteAddr string, port int) (ok bool, reason string)
+type AllowFunc func(remoteAddr string) (ok bool, reason string)
 
 type Gateway struct {
 	bindPort int
@@ -184,12 +178,12 @@ func (g *Gateway) Run() {
 
 		// Before the ssh handshake, not after: this port reaches the same
 
-		// tunneling as the control port, so a peer the firewall has turned
+		// tunneling as the control port, so a peer the anti-bot layer has
 
-		// away there must not get a second door here.
+		// turned away there must not get a second door here.
 
 		if g.allow != nil {
-			if ok, reason := g.allow(conn.RemoteAddr().String(), g.bindPort); !ok {
+			if ok, reason := g.allow(conn.RemoteAddr().String()); !ok {
 
 				if reason != "" {
 					log.Warnf("[FW] reject ssh %s reason: %s", conn.RemoteAddr(), reason)
