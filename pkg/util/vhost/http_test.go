@@ -78,7 +78,9 @@ func TestHTTPServerProtocols(t *testing.T) {
 		require.NoError(t, err)
 		defer response.Body.Close()
 
-		require.NotEqual(t, http.StatusSwitchingProtocols, response.StatusCode)
+		// The fork keeps serving the Upgrade handshake that upstream dropped -
+		// see NewHTTPReverseProxy. A client asking for h2c this way gets it.
+		require.Equal(t, http.StatusSwitchingProtocols, response.StatusCode)
 	})
 }
 

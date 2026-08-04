@@ -41,6 +41,8 @@ import (
 
 	libio "github.com/fatedier/golib/io"
 	"github.com/fatedier/golib/pool"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c" //nolint:staticcheck // SA1019: see NewHTTPReverseProxy
 
 	httppkg "github.com/fatedier/frp/pkg/util/http"
 	"github.com/fatedier/frp/pkg/util/log"
@@ -202,7 +204,16 @@ func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *
 			_, _ = rw.Write(getNotFoundPageContent())
 		},
 	}
-	rp.proxy = proxy
+	// Upstream dropped the HTTP/1.1 Upgrade handshake in #5436, keeping only
+	// prior-knowledge cleartext HTTP/2 through Server.Protocols. The fork keeps
+	// serving the Upgrade as well: a client that reaches a tunneled service
+	// with `curl --http2` over plain http negotiates that way, and silently
+	// answering it in HTTP/1.1 is a capability this fork already had.
+	//
+	// Both paths coexist. Server.Protocols handles prior-knowledge before the
+	// handler is reached, so what arrives here is HTTP/1.1 - including the
+	// Upgrade request this wrapper exists to answer.
+	rp.proxy = h2c.NewHandler(proxy, &http2.Server{}) //nolint:staticcheck // SA1019: deliberate, see above
 	return rp
 }
 
