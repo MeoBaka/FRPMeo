@@ -19,6 +19,7 @@ package proxy
 import (
 	"context"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,10 +46,28 @@ type p2pMetrics struct {
 	name string
 	mt   transport.MessageTransporter
 
-	tcpConns    atomic.Int64 // active TCP streams
-	lastUDPNano atomic.Int64 // unix-nano of the last real UDP packet; 0 = none
-	in          atomic.Int64 // cumulative bytes read from the tunnel
-	out         atomic.Int64 // cumulative bytes written to the tunnel
+	// mergePeers makes a peer using both halves count once rather than twice.
+	//
+	// Only the merged proxy type sets it. On xtcp+xudp the two halves are
+	// tagged streams over one visitor session, so a remote desktop - which
+	// takes tcp and udp at the same time - is one visitor, not two. Plain xtcp
+	// and xudp carry one transport each and count the way a plain tcp proxy
+	// does. This is the same rule the relay path applies in server/proxy's
+	// peerTracker; the two paths disagreeing is what made one visitor read as
+	// two or three on the dashboard.
+	mergePeers bool
+
+	mu sync.Mutex
+	// tcpByPeer counts open TCP streams per peer, udpByPeer holds the unix-nano
+	// of each peer's last real UDP packet. Keyed by address without the port,
+	// because the port is what makes two connections from one machine look
+	// like two peers.
+	tcpByPeer map[string]int
+	udpByPeer map[string]int64
+
+	tcpTotal atomic.Int64 // active TCP streams, for the un-merged count
+	in       atomic.Int64 // cumulative bytes read from the tunnel
+	out      atomic.Int64 // cumulative bytes written to the tunnel
 
 	lastConns int64
 	lastIn    int64
@@ -57,8 +76,30 @@ type p2pMetrics struct {
 	started atomic.Bool
 }
 
-func newP2PMetrics(name string, mt transport.MessageTransporter) *p2pMetrics {
-	return &p2pMetrics{name: name, mt: mt}
+func newP2PMetrics(name string, mt transport.MessageTransporter, mergePeers bool) *p2pMetrics {
+	return &p2pMetrics{
+		name:       name,
+		mt:         mt,
+		mergePeers: mergePeers,
+		tcpByPeer:  make(map[string]int),
+		udpByPeer:  make(map[string]int64),
+	}
+}
+
+// peerKey reduces a connection to the peer behind it. Dropping the port is the
+// whole point: one machine opening two streams is one peer.
+func peerKey(c net.Conn) string {
+	if c == nil {
+		return ""
+	}
+	addr := c.RemoteAddr()
+	if addr == nil {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(addr.String()); err == nil {
+		return host
+	}
+	return addr.String()
 }
 
 // countBytes wraps a tunnel stream so its bytes are counted. It does NOT count a
@@ -71,32 +112,82 @@ func (m *p2pMetrics) countBytes(c net.Conn) net.Conn {
 	return &byteCountConn{Conn: c, m: m}
 }
 
-func (m *p2pMetrics) tcpOpen() {
-	if m != nil {
-		m.tcpConns.Add(1)
+func (m *p2pMetrics) tcpOpen(c net.Conn) {
+	if m == nil {
+		return
 	}
+	m.tcpTotal.Add(1)
+
+	m.mu.Lock()
+	m.tcpByPeer[peerKey(c)]++
+	m.mu.Unlock()
 }
 
-func (m *p2pMetrics) tcpClose() {
-	if m != nil {
-		m.tcpConns.Add(-1)
+func (m *p2pMetrics) tcpClose(c net.Conn) {
+	if m == nil {
+		return
 	}
+	m.tcpTotal.Add(-1)
+
+	key := peerKey(c)
+	m.mu.Lock()
+	if n := m.tcpByPeer[key] - 1; n > 0 {
+		m.tcpByPeer[key] = n
+	} else {
+		delete(m.tcpByPeer, key)
+	}
+	m.mu.Unlock()
 }
 
 // udpActivity records that a real UDP packet just flowed on the tunnel.
-func (m *p2pMetrics) udpActivity() {
-	if m != nil {
-		m.lastUDPNano.Store(time.Now().UnixNano())
+func (m *p2pMetrics) udpActivity(c net.Conn) {
+	if m == nil {
+		return
 	}
+	m.mu.Lock()
+	m.udpByPeer[peerKey(c)] = time.Now().UnixNano()
+	m.mu.Unlock()
 }
 
-// currentConns is TCP streams plus 1 if UDP has been active within udpIdleTimeout.
+// currentConns is what gets reported to frps.
+//
+// Merged: the number of distinct peers using either half. Otherwise: TCP
+// streams plus 1 if UDP has been active within udpIdleTimeout, which is what a
+// single-transport proxy has always reported.
 func (m *p2pMetrics) currentConns() int64 {
-	c := m.tcpConns.Load()
-	if last := m.lastUDPNano.Load(); last != 0 && time.Since(time.Unix(0, last)) < udpIdleTimeout {
-		c++
+	cutoff := time.Now().Add(-udpIdleTimeout).UnixNano()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Idle udp peers are dropped here rather than on a timer: this runs on the
+	// report tick, and a peer with nothing recent is exactly what the map must
+	// not keep growing with.
+	udpActive := false
+	for key, last := range m.udpByPeer {
+		if last < cutoff {
+			delete(m.udpByPeer, key)
+			continue
+		}
+		udpActive = true
 	}
-	return c
+
+	if !m.mergePeers {
+		c := m.tcpTotal.Load()
+		if udpActive {
+			c++
+		}
+		return c
+	}
+
+	peers := make(map[string]struct{}, len(m.tcpByPeer)+len(m.udpByPeer))
+	for key := range m.tcpByPeer {
+		peers[key] = struct{}{}
+	}
+	for key := range m.udpByPeer {
+		peers[key] = struct{}{}
+	}
+	return int64(len(peers))
 }
 
 // startReporter launches the periodic delta reporter once (idempotent). It stops
@@ -118,8 +209,11 @@ func (m *p2pMetrics) startReporter(ctx context.Context) {
 			case <-ctx.Done():
 				// Final report: force our reported connections to 0 so frps does
 				// not keep a stale value on graceful shutdown.
-				m.tcpConns.Store(0)
-				m.lastUDPNano.Store(0)
+				m.tcpTotal.Store(0)
+				m.mu.Lock()
+				clear(m.tcpByPeer)
+				clear(m.udpByPeer)
+				m.mu.Unlock()
 				m.flush()
 				return
 			case <-ticker.C:

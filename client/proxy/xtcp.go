@@ -69,7 +69,7 @@ func NewXTCPProxy(baseProxy *BaseProxy, cfg v1.ProxyConfigurer) Proxy {
 
 		cfg: unwrapped,
 
-		metrics: newP2PMetrics(naming.AddUserPrefix(baseProxy.clientCfg.User, unwrapped.Name), baseProxy.msgTransporter),
+		metrics: newP2PMetrics(naming.AddUserPrefix(baseProxy.clientCfg.User, unwrapped.Name), baseProxy.msgTransporter, false),
 	}
 }
 
@@ -262,10 +262,10 @@ func (pxy *XTCPProxy) listenByKCP(listenConn *net.UDPConn, raddr *net.UDPAddr, s
 
 		stream := pxy.metrics.countBytes(muxConn)
 
-		pxy.metrics.tcpOpen()
+		pxy.metrics.tcpOpen(stream)
 
 		go func() {
-			defer pxy.metrics.tcpClose()
+			defer pxy.metrics.tcpClose(stream)
 
 			pxy.HandleTCPWorkConnection(stream, startWorkConnMsg, []byte(pxy.cfg.Secretkey))
 		}()
@@ -333,10 +333,10 @@ func (pxy *XTCPProxy) listenByQUIC(listenConn *net.UDPConn, _ *net.UDPAddr, star
 
 		wrapped := pxy.metrics.countBytes(netpkg.QuicStreamToNetConn(stream, c))
 
-		pxy.metrics.tcpOpen()
+		pxy.metrics.tcpOpen(wrapped)
 
 		go func() {
-			defer pxy.metrics.tcpClose()
+			defer pxy.metrics.tcpClose(wrapped)
 
 			pxy.HandleTCPWorkConnection(wrapped, startWorkConnMsg, []byte(pxy.cfg.Secretkey))
 		}()

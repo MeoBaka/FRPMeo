@@ -89,7 +89,7 @@ func NewXTCPXUDPProxy(baseProxy *BaseProxy, cfg v1.ProxyConfigurer) Proxy {
 
 		cfg: unwrapped,
 
-		metrics: newP2PMetrics(naming.AddUserPrefix(baseProxy.clientCfg.User, unwrapped.Name), baseProxy.msgTransporter),
+		metrics: newP2PMetrics(naming.AddUserPrefix(baseProxy.clientCfg.User, unwrapped.Name), baseProxy.msgTransporter, true),
 	}
 }
 
@@ -371,9 +371,9 @@ func (pxy *XTCPXUDPProxy) handleStream(stream net.Conn, startWorkConnMsg *msg.St
 
 		// Count the TCP session for the lifetime of the connection.
 
-		pxy.metrics.tcpOpen()
+		pxy.metrics.tcpOpen(stream)
 
-		defer pxy.metrics.tcpClose()
+		defer pxy.metrics.tcpClose(stream)
 
 		pxy.HandleTCPWorkConnection(stream, startWorkConnMsg, []byte(pxy.cfg.Secretkey))
 
@@ -493,7 +493,7 @@ func (pxy *XTCPXUDPProxy) handleUDPWorkConnection(stream net.Conn) {
 
 		}
 
-		pxy.metrics.udpActivity() // a real UDP packet flowed -> session is active
+		pxy.metrics.udpActivity(stream) // a real UDP packet flowed -> session is active
 
 		if errRet := errors.PanicToError(func() {
 			readCh <- &udpMsg

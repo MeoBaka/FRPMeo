@@ -81,7 +81,7 @@ func NewXUDPProxy(baseProxy *BaseProxy, cfg v1.ProxyConfigurer) Proxy {
 
 		cfg: unwrapped,
 
-		metrics: newP2PMetrics(naming.AddUserPrefix(baseProxy.clientCfg.User, unwrapped.Name), baseProxy.msgTransporter),
+		metrics: newP2PMetrics(naming.AddUserPrefix(baseProxy.clientCfg.User, unwrapped.Name), baseProxy.msgTransporter, false),
 	}
 }
 
@@ -439,7 +439,7 @@ func (pxy *XUDPProxy) handleUDPWorkConnection(stream net.Conn) {
 
 		}
 
-		pxy.metrics.udpActivity() // a real UDP packet flowed -> session is active
+		pxy.metrics.udpActivity(stream) // a real UDP packet flowed -> session is active
 
 		if errRet := errors.PanicToError(func() {
 			readCh <- &udpMsg
