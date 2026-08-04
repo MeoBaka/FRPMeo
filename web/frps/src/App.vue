@@ -86,7 +86,7 @@
             :class="{ active: route.path.startsWith('/firewall') }"
             @click="closeSidebar"
           >
-            Firewall
+            Anti-Bot
           </router-link>
         </nav>
       </aside>
