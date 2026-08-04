@@ -61,6 +61,16 @@ const (
 	// maxReportedReasons caps how many refusal reasons a line names before the
 	// rest are summed into a remainder. Keeps one line one line.
 	maxReportedReasons = 5
+
+	// maxNamedRefusals is how many refusals a period names one at a time before
+	// the reporting switches to a summary.
+	//
+	// A trickle is easier to read as a line each - which address, which reason -
+	// and costs nothing to write. Past that the lines stop being information and
+	// become the flood, which is what the summary is for. Getting this wrong in
+	// the quiet direction is what made a single reputation block read as an
+	// attack starting and ending.
+	maxNamedRefusals = 5
 )
 
 // monitor turns what the guard decided into a report every reportIntervalMs
@@ -82,11 +92,17 @@ type monitor struct {
 	// than one guard reporting.
 	name string
 
-	// The episode: everything since the first refusal after a quiet spell.
+	// The episode: everything since the reporting switched to summaries.
+	// Below that threshold refusals are named one at a time and no episode is
+	// opened, so a trickle never reads as an attack.
 	active       bool
+	sawAttack    bool
 	episodeStart int64
 	epAllowed    int64
 	epRefused    int64
+
+	// named counts the refusals this period has already reported on their own.
+	named int
 
 	// The current period, cleared every report.
 	periodStart int64
@@ -187,14 +203,25 @@ func (m *monitor) note(now int64, allowed bool, reason, remote string) string {
 		m.moreSources = true
 	}
 
-	if allowed || m.active {
+	if allowed {
 		return ""
 	}
 
-	m.active = true
-	m.episodeStart = now
+	// Already summarizing: the periodic line covers this one.
+	if m.active {
+		return ""
+	}
 
-	return fmt.Sprintf("[FW] %s: refusing connections - %s reason: %s", m.name, remote, reason)
+	m.named++
+	if m.named > maxNamedRefusals {
+		// Too many to keep naming. Switch to summaries from here, and let the
+		// next tick be the one that speaks.
+		m.active = true
+		m.episodeStart = m.periodStart
+		return ""
+	}
+
+	return fmt.Sprintf("[FW] %s: refused %s reason: %s", m.name, remote, reason)
 }
 
 // tick is the periodic report. It returns the line to log, or "" when there is
@@ -208,8 +235,14 @@ func (m *monitor) tick(now int64, underAttack bool) string {
 	defer m.mu.Unlock()
 
 	if !m.active && !underAttack {
+		// A trickle: every refusal was already named on its own, so there is
+		// nothing to summarize and no episode to close.
 		m.resetPeriod(now)
 		return ""
+	}
+
+	if underAttack {
+		m.sawAttack = true
 	}
 
 	m.epAllowed += m.allowed
@@ -226,10 +259,14 @@ func (m *monitor) tick(now int64, underAttack bool) string {
 
 	// Refusals have stopped and the attack state is down: the episode is over.
 	if m.refused == 0 && !underAttack {
-		line := fmt.Sprintf("[FW] %s: attack over - refused %d, allowed %d over %s",
-			m.name, m.epRefused, m.epAllowed, since(m.episodeStart, now))
+		what := "refusals stopped"
+		if m.sawAttack {
+			what = "attack over"
+		}
+		line := fmt.Sprintf("[FW] %s: %s - refused %d, allowed %d over %s",
+			m.name, what, m.epRefused, m.epAllowed, since(m.episodeStart, now))
 
-		m.active = false
+		m.active, m.sawAttack = false, false
 		m.epRefused, m.epAllowed, m.episodeStart = 0, 0, 0
 		m.resetPeriod(now)
 
@@ -299,6 +336,7 @@ func (m *monitor) resetPeriod(now int64) {
 	m.periodStart = now
 	m.allowed, m.refused = 0, 0
 	m.peak, m.inSecond = 0, 0
+	m.named = 0
 	clear(m.refusedBy)
 	clear(m.allowedBy)
 	clear(m.sources)

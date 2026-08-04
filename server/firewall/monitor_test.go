@@ -36,24 +36,76 @@ func TestMonitorSaysNothingWhenQuiet(t *testing.T) {
 	}
 }
 
-// The first refusal is named at once. Holding it for up to five seconds would
-// make one denied client look like nothing happened, which is the case where
+// A trickle is named one refusal at a time. Holding them for a summary would
+// make a denied client look like nothing happened, which is the case where
 // somebody is staring at the log asking why they cannot connect.
-func TestMonitorNamesTheFirstRefusalImmediately(t *testing.T) {
+func TestMonitorNamesEachRefusalWhileTheyAreFew(t *testing.T) {
 	m := newMonitor("control 0.0.0.0:7000")
 
 	line := m.note(1000, false, "rule r", "10.0.0.9:5555")
 	if line == "" {
-		t.Fatal("the refusal that opens an episode was not logged")
+		t.Fatal("the first refusal was not logged")
 	}
 	for _, want := range []string{"10.0.0.9:5555", "rule r"} {
 		if !strings.Contains(line, want) {
-			t.Errorf("opening line %q does not mention %q", line, want)
+			t.Errorf("line %q does not mention %q", line, want)
 		}
 	}
 
-	if again := m.note(1100, false, "rule r", "10.0.0.9:5556"); again != "" {
-		t.Errorf("a second refusal logged its own line %q; the period report covers it", again)
+	if again := m.note(1100, false, "rule r", "10.0.0.9:5556"); again == "" {
+		t.Error("a second refusal was swallowed; while they are few, each one is named")
+	}
+}
+
+// The production case this exists for: a reputation provider turning away one
+// address every couple of minutes. That is not an attack, and reporting it as
+// one - an opening line, a periodic line, then "attack over" - said three
+// wrong things about a single refused connection.
+func TestMonitorTrickleIsNotAnAttack(t *testing.T) {
+	m := newMonitor("proxy")
+
+	for i := range 3 {
+		now := int64(i) * 120_000 // two minutes apart
+
+		if line := m.note(now, false, "reputation", "203.0.113.7:1000"); line == "" {
+			t.Fatalf("refusal %d was not named", i+1)
+		}
+		m.note(now+1, true, "default allow", "198.51.100.4:1")
+
+		// Several report ticks pass with nothing sustained.
+		for tick := range 3 {
+			if line := m.tick(now+int64(tick+1)*5000, false); line != "" {
+				t.Fatalf("a trickle produced %q; nothing here is an attack", line)
+			}
+		}
+	}
+}
+
+// Past the budget the lines stop being information and become the flood, so
+// the reporting switches to summaries - and that is when an episode opens.
+func TestMonitorSwitchesToSummaryWhenRefusalsPileUp(t *testing.T) {
+	m := newMonitor("proxy")
+
+	named := 0
+	for range maxNamedRefusals + 4 {
+		if line := m.note(1000, false, "rate limit", "203.0.113.7:1000"); line != "" {
+			named++
+		}
+	}
+	if named != maxNamedRefusals {
+		t.Fatalf("named %d refusals individually, want %d before switching", named, maxNamedRefusals)
+	}
+
+	line := m.tick(6000, false)
+	if !strings.Contains(line, "refused 9") {
+		t.Fatalf("summary did not count every refusal\ngot: %s", line)
+	}
+
+	// And it closes as refusals stopping, not as an attack, because none of
+	// this ever raised the attack state.
+	closing := m.tick(11000, false)
+	if !strings.Contains(closing, "refusals stopped") {
+		t.Errorf("closing line calls it an attack when nothing was under attack\ngot: %s", closing)
 	}
 }
 
@@ -166,7 +218,8 @@ func TestMonitorSourceCountSaturates(t *testing.T) {
 func TestMonitorNamesASingleSource(t *testing.T) {
 	m := newMonitor("control 0.0.0.0:7000")
 
-	for i := range 5 {
+	// Past the naming budget, so a summary is produced at all.
+	for i := range maxNamedRefusals + 3 {
 		m.note(1000, false, "rate limit", fmt.Sprintf("10.0.0.7:%d", 1000+i))
 	}
 
