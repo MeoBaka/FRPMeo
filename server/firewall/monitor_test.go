@@ -57,9 +57,10 @@ func TestMonitorNamesEachRefusalWhileTheyAreFew(t *testing.T) {
 	}
 }
 
-// The production case this exists for: a reputation provider turning away one
-// address every couple of minutes. That is not an attack, and reporting it as
-// one - an opening line, a periodic line, then "attack over" - said three
+// The production case this exists for: one address turned away every couple
+// of minutes (a reputation lookup did that, before it was removed). That is
+// not an attack, and reporting it as one - an opening line, a periodic line,
+// then "attack over" - said three
 // wrong things about a single refused connection.
 func TestMonitorTrickleIsNotAnAttack(t *testing.T) {
 	m := newMonitor("proxy")

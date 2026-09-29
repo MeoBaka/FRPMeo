@@ -21,10 +21,9 @@ import (
 	"time"
 )
 
-// AntiAttacker is per-source rate limiting for traffic that already passed the
-// rules and the reputation provider. Rules answer "is this peer allowed here",
-// which is a question about identity; this answers "is it asking too often",
-// which is a question about behavior, and no list of addresses can express it.
+// AntiAttacker is per-source rate limiting for user traffic. It answers "is this
+// peer asking too often" - a question about behavior, which no list of
+// addresses can express.
 //
 // It cannot stop packets: by the time frps is handed a connection the kernel has
 // already completed the TCP handshake. What it does is make the refusal cost
@@ -37,8 +36,8 @@ import (
 // in it, banned after 3 separate windows go over, ban lasting 60 s.
 type AntiAttackerConfig struct {
 	// Enabled is off by default and deliberately so. A rate limit set too low
-	// locks out real users, and unlike a deny rule nobody typed it in against a
-	// specific address - it just starts refusing people.
+	// locks out real users, and not ones anybody chose - it just starts
+	// refusing people.
 	Enabled bool `json:"enabled"`
 
 	// TCP counts connections and is consulted once per accepted connection.
@@ -59,19 +58,16 @@ type AntiAttackerConfig struct {
 	// like one client is poolCount connections at startup and more as the pool
 	// is replenished. Limits sized for logins would throttle a healthy client.
 	//
-	// Its own switch as well, matching how the rules half of this firewall
-	// treats the control port: locking out the clients that keep the tunnels up
+	// Its own switch as well: locking out the clients that keep the tunnels up
 	// is a bigger mistake than letting one flood through, so nobody gets it
 	// without asking.
 	Control ControlProfile `json:"control"`
 
 	// Web rate-limits the dashboard port, and SSH the ssh tunnel gateway port.
 	//
-	// Both are separate from Control rather than folded into it, even though the
-	// rules half of this firewall does group the control port and the ssh
-	// gateway under one switch. Grouping is right for allow and deny, which ask
-	// who the peer is; it is wrong here, because these three carry very
-	// different volumes. Only the control port has an frpc pool behind it, so
+	// Both are separate from Control rather than folded into it, because the
+	// three carry very different volumes. Only the control port has an frpc
+	// pool behind it, so
 	// only it needs a limit in the hundreds - handing the same number to a login
 	// form would leave a password guesser almost unhindered.
 	Web ControlProfile `json:"web"`
@@ -277,7 +273,7 @@ type RateProfile struct {
 	// Unlike the per-source tier this one only ever throttles: it never bans.
 	// A /24 can be a carrier-grade NAT block with a whole town behind it, and
 	// banning the one address an attacker used would take the town with it.
-	// Blocking a range outright is what a deny rule is for - that way it is
+	// Blocking a range outright belongs in the host firewall - that way it is
 	// something a person decided, not something a counter did.
 	SubnetMaxPerWindow int `json:"subnetMaxPerWindow,omitempty"`
 
@@ -304,15 +300,10 @@ type RateProfile struct {
 type HTTPProfile struct {
 	RateProfile
 
-	// Which peers' X-Forwarded-For may be believed is not configured here: it
-	// is the allow rules marked trusted. See Rule.Trusted.
-	//
-	// The header is written by whoever is talking to us, so believing it from
-	// the wrong peer does not merely weaken the limit, it removes it - an
-	// attacker sends a different value each request and is never the same
-	// source twice. That is why it is the trusted tick rather than any allow
-	// rule: "allow" says a peer may pass, and a broad allow would hand the
-	// header to everyone it covers.
+	// X-Forwarded-For is never believed; see Firewall.AdmitHTTP. The header is
+	// written by whoever is talking to us, so believing it would not merely
+	// weaken the limit, it would remove it - an attacker sends a different
+	// value each request and is never the same source twice.
 
 	// RetryAfterSec is the Retry-After sent with 429. Zero uses the remaining
 	// ban or window, which is what a client actually needs to wait.
@@ -685,7 +676,7 @@ func (l *limiter) admit(key string, p RateProfile, banning bool) Verdict {
 		// and new ones are let through. Losing the limit for new sources is the
 		// lesser failure - a flood from more than MaxTracked distinct addresses
 		// is distributed enough that per-source counting was never going to
-		// stop it, and that is what the reputation provider is for.
+		// stop it; the subnet and global tiers are what is left for that.
 		if len(l.trackers) >= p.MaxTracked {
 			l.pruneLocked(now, p.IdleForgetMs)
 			if len(l.trackers) >= p.MaxTracked {

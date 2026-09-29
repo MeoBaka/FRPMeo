@@ -66,8 +66,8 @@
 
       <template v-if="snap.antiAttacker.enabled">
         <p class="hint" style="margin-top:12px">
-          Applies to every proxy. Which sources are exempt is a rules question,
-          not a second list here: add an allow rule and tick Trusted.
+          Applies to every proxy. No address is exempt by being listed: a source
+          earns its way out of the counting by behaving - see Trust below.
         </p>
 
         <el-divider content-position="left">TCP - counted per connection</el-divider>
@@ -76,8 +76,8 @@
           <span class="hint">
             tcp, mc, tcpmux, https and the tcp half of tcp+udp. Refused
             connections are closed with RST, leaving no TIME_WAIT socket
-            behind. Not the frps control port: rules still guard that, but it
-            is not rate limited. stcp / sudp / xtcp+xudp are exempt too - their
+            behind. Not the frps control port, which has its own switch
+            below. stcp / sudp / xtcp+xudp are exempt too - their
             callers proved a shared secret to get this far, so a limit could
             only throttle a tunnel that is entitled to the traffic.
           </span>
@@ -107,9 +107,9 @@
           the only tier that sees a botnet rotating through one - each address
           gets a single unremarkable attempt, so per-source counting has nothing
           to look at. It only throttles, never bans: a /24 can be a carrier-grade
-          NAT block with a whole town behind it. To block a range outright, write
-          a deny rule instead, so it is a decision rather than a counter. Leave
-          at 0 to switch the tier off.
+          NAT block with a whole town behind it. To block a range outright, use
+          the host firewall, so it is a decision rather than a counter. Leave at
+          0 to switch the tier off.
         </p>
 
         <el-divider content-position="left">HTTP - counted per request</el-divider>
@@ -138,14 +138,12 @@
           <el-button @click="save" :loading="saving">Save</el-button>
         </div>
         <p class="hint" style="margin-top:12px" v-if="snap.antiAttacker.http.enabled">
-          X-Forwarded-For is believed only from a peer covered by an allow rule
-          with Trusted ticked - add one naming your load balancer or CDN. From
-          anyone else the socket address is counted instead, which behind a CDN
-          means every visitor counts as one source, so raise the limit
-          accordingly. It is the Trusted tick rather than any allow rule because
-          believing the header from a peer you merely allow does not weaken the
-          limit, it removes it: the value is written by whoever is calling, so an
-          attacker is never the same source twice.
+          X-Forwarded-For is never believed: each request is counted against the
+          address that connected. Behind a CDN or load balancer every visitor
+          therefore counts as that one source, so raise the limit accordingly.
+          Believing the header would not weaken the limit, it would remove it:
+          the value is written by whoever is calling, so an attacker would never
+          be the same source twice.
         </p>
 
 
@@ -284,8 +282,8 @@
         <div class="bar">
           <el-switch v-model="snap.antiAttacker.web.protect" @change="save" />
           <span class="hint">
-            This page's own port. Rules only stop addresses somebody thought to
-            list, so this is the layer that answers password guessing. Careful:
+            This page's own port, and the layer that answers password guessing
+            (webServer.allowCIDRs in frps.toml limits who can reach it at all). Careful:
             this page is what edits these settings, and a limit set very low can
             lock you out until frps_firewall.json is edited on the server. The
             default leaves room for a page load, which opens several connections

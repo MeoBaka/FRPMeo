@@ -95,10 +95,8 @@ type ResourceController struct {
 
 	PluginManager *plugin.Manager
 
-	// Native firewall: access control for incoming user connections
-
-	// (IP/CIDR + proxy + user rules), managed from the dashboard.
-
+	// Native firewall: rate limits and bans for incoming connections, managed
+	// from the dashboard's Anti-Bot page.
 	Firewall *firewall.Firewall
 
 	// Unlock requests for secure https proxies, which arrive on the http port
