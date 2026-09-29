@@ -228,6 +228,42 @@ localPort = 22
 remotePort = 0
 
 [[proxies]]
+name = "game_secure"
+type = "tcp"
+localPort = 25565
+remotePort = 6010
+# Secure access: frps refuses every visitor until they present the key. It takes
+# the key in these ways itself, and the backend never sees any of them:
+#   link: open http://{serverAddr}:6010/?dangnhap=YOUR_KEY once; the visitor's IP
+#         is unlocked for secure.unlockSeconds, then any app connects as usual
+#   http: any request with the header "dangnhap: YOUR_KEY" (or a form/JSON field),
+#         e.g. curl -X POST http://{serverAddr}:6010/ -H "dangnhap: YOUR_KEY"
+#   line: "dangnhap: YOUR_KEY" as the first line of the connection, with the
+#         rest going to the backend - for clients you write yourself
+# Works for tcp, udp, http, https, tcpmux, tcp+udp, mc and pe proxies, but not in
+# a loadBalancer group. frpc will not start the proxy on an frps without support.
+secure.enable = true
+# The name the key travels under: header, query parameter, form field, line prefix
+secure.title = "dangnhap"
+# The key itself, 6-256 characters
+secure.key = "change-me-please"
+# Accepted ways; empty means every way the proxy type allows
+# secure.methods = ["link", "http", "line"]
+# How long an unlocked IP stays unlocked, default 43200 (12 hours)
+# secure.unlockSeconds = 43200
+# If set, only these IPs or CIDRs may connect at all - and they still need the key
+# secure.allowIPs = ["203.0.113.0/24"]
+# These IPs or CIDRs connect without the key
+# secure.trustedIPs = ["198.51.100.7"]
+# Anti-spam. 0 means the default, a negative value turns the check off.
+# Ban a source after this many wrong keys, default 5
+# secure.antiSpam.maxFailures = 5
+# Ban a source that tries this often in a minute without a valid key, default 30
+# secure.antiSpam.maxAttemptsPerMinute = 30
+# How long a ban lasts in seconds, default 600
+# secure.antiSpam.banSeconds = 600
+
+[[proxies]]
 name = "dns"
 type = "udp"
 localIP = "114.114.114.114"

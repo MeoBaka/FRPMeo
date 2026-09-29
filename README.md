@@ -19,6 +19,7 @@
 |---|---|
 | New types | `xudp`, `xtcp+xudp`, `tcp+udp`, `stcp+sudp`, `mc` (Minecraft Java host routing, issue [#5390](https://github.com/fatedier/frp/issues/5390)), `pe` (Minecraft Bedrock host routing) |
 | Security | Default `transport.wireProtocol` switched **v1 → v2** (v1 kept as an option) |
+| Security | Per-proxy **secure access**: visitors present a key (link, HTTP request or first line) before frps forwards anything; allowed/trusted IP lists; anti-spam bans ([section 7](#7-secure-access--lock-a-proxy-behind-a-key)) |
 | Bug fix | Reconnect getting stuck after `i/o deadline reached` on v2 (issue [#5355](https://github.com/fatedier/frp/issues/5355)) |
 | Dashboard | frpc admin API + Vue UI with full support for the new types |
 | Examples | `examples/frpc_example.toml`, `examples/frps_example.toml` (fully commented) |
@@ -266,6 +267,55 @@ Binaries are emitted to the `bin/` directory. Verify the sample configs:
 
 `examples/frpc_example.toml` and `examples/frps_example.toml` are complete configuration sets,
 with English comments on every entry — including all of the new types above.
+
+---
+
+## 7. Secure access — lock a proxy behind a key
+
+Any public proxy (`tcp`, `udp`, `http`, `https`, `tcpmux`, `tcp+udp`, `mc`, `pe`) can require visitors
+to present a key before frps forwards anything to the backend. The key is `<title>: <key>` — a name
+you choose (`auth`, `dangnhap`, …) and the secret itself — and it can be presented three ways, each of
+which can be switched off:
+
+| Method | How the visitor presents it | Effect |
+|---|---|---|
+| `link` | opens `http://<frps>:<port>/?dangnhap=KEY` once | unlocks their IP for `unlockSeconds` (http proxies also set a cookie) |
+| `http` | any request with the header `dangnhap: KEY`, or a form/JSON field of that name | unlocks their IP (on http proxies it admits that request) |
+| `line` | sends `dangnhap: KEY` as the first line of the connection | admits that connection; the rest goes to the backend |
+
+Games, RDP and SSH cannot send a key themselves, so the usual flow is: open the link once, then
+connect as normal. frps serves the link on the proxy's own port — for `udp`/`pe` it listens on TCP
+with the same port number, for `mc` it routes the request by its `Host` like a handshake, and for
+`https` it is served on frps' `vhostHTTPPort` for the proxy's domain.
+
+```toml
+[[proxies]]
+name = "minecraft"
+type = "tcp"
+localPort = 25565
+remotePort = 25565
+secure.enable = true
+secure.title = "dangnhap"
+secure.key = "change-me-please"
+# secure.methods = ["link", "http", "line"]  # empty = every method the type allows
+# secure.unlockSeconds = 43200               # 12 hours
+# secure.allowIPs = ["203.0.113.0/24"]       # only these may connect, and they still need the key
+# secure.trustedIPs = ["198.51.100.7"]       # these connect without the key
+# secure.antiSpam.maxFailures = 5            # wrong keys before a ban (-1 = off)
+# secure.antiSpam.maxAttemptsPerMinute = 30  # tries without a valid key per minute (-1 = off)
+# secure.antiSpam.banSeconds = 600
+```
+
+The frpc dashboard has a **Secure Access** section with a key generator and ready-to-copy links; the
+frps dashboard shows the settings but never the key.
+
+- frpc refuses to start a secure proxy on an frps that does not support it — an older frps would
+  silently serve it unlocked — and frps rejects methods the proxy type cannot carry (`line` on
+  `http`, `https` and `mc`).
+- The unit of trust is the IP address: everyone behind the same NAT shares an unlock, and the address
+  is the one frps sees directly (a CDN in front of frps hides visitors' real IPs).
+- Not available with `loadBalancer.group`, nor on `stcp`/`sudp`/`xtcp` and their merged types, which
+  already require `secretKey`.
 
 ---
 

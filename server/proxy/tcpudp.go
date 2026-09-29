@@ -263,7 +263,7 @@ func (pxy *TCPUDPProxy) runUDPRelay() {
 		IdleTimeout: time.Duration(pxy.serverCfg.UDPSessionTimeout) * time.Second,
 	}
 	go func() {
-		udp.ForwardUserConn(pxy.udpConn, pxy.readCh, pxy.sendCh, int(pxy.serverCfg.UDPPacketSize), tracker, pxy.newUDPAdmitFilter(pxy.realBindPort))
+		udp.ForwardUserConnPackets(pxy.udpConn, pxy.readCh, pxy.sendCh, int(pxy.serverCfg.UDPPacketSize), tracker, pxy.newUDPPacketFilter(pxy.realBindPort))
 		pxy.Close()
 	}()
 }

@@ -60,6 +60,18 @@ type HTTPReverseProxy struct {
 	vhostRouter *Routers
 
 	responseHeaderTimeout time.Duration
+
+	// noRouteHandler, when set, gets a request no http route claims before it
+	// is answered with a 404. See SetNoRouteHandler.
+	noRouteHandler func(http.ResponseWriter, *http.Request) bool
+}
+
+// SetNoRouteHandler installs h for requests whose host and path match no http
+// route: frps uses it to take unlock links for secure https proxies, whose own
+// traffic it cannot read. h reports whether it answered; if not, the request
+// gets the usual 404. Call it before serving.
+func (rp *HTTPReverseProxy) SetNoRouteHandler(h func(http.ResponseWriter, *http.Request) bool) {
+	rp.noRouteHandler = h
 }
 
 func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *HTTPReverseProxy {
@@ -407,8 +419,14 @@ func (rp *HTTPReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 
 	rc := newreq.Context().Value(RouteConfigKey).(*RouteConfig)
 
+	if rc == nil && rp.noRouteHandler != nil && rp.noRouteHandler(rw, req) {
+		return
+	}
+
 	if rc != nil && rc.AllowFn != nil {
-		if d := rc.AllowFn(req); !d.Allowed {
+		// Handed the request that will be forwarded, so a check can strip what
+		// the backend should not see - a secure proxy's key, for one.
+		if d := rc.AllowFn(newreq); !d.Allowed {
 
 			// Retry-After first: it has to be on the ResponseWriter before
 
@@ -418,13 +436,24 @@ func (rp *HTTPReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 				rw.Header().Set("Retry-After", strconv.Itoa(d.RetryAfterSec))
 			}
 
+			for k, vs := range d.Header {
+				for _, v := range vs {
+					rw.Header().Add(k, v)
+				}
+			}
+
 			code := d.StatusCode
 
 			if code == 0 {
 				code = http.StatusForbidden
 			}
 
-			http.Error(rw, http.StatusText(code), code)
+			if d.Body != nil {
+				rw.WriteHeader(code)
+				_, _ = rw.Write(d.Body)
+			} else {
+				http.Error(rw, http.StatusText(code), code)
+			}
 
 			return
 

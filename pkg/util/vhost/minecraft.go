@@ -15,14 +15,22 @@
 package vhost
 
 import (
+	"bufio"
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	libnet "github.com/fatedier/golib/net"
 )
+
+// A handshake opens with a VarInt length and packet id 0, so its second byte is
+// either 0 or a length continuation - never a letter. None of these can start
+// one, which makes an HTTP request unambiguous from its first four bytes.
+var httpRequestStarts = []string{"GET ", "POST", "PUT ", "HEAD", "PATC", "DELE", "OPTI"}
 
 // maxMinecraftHandshakeSize bounds how many payload bytes we read while looking
 // for the routing hostname, protecting against a client that declares a huge
@@ -51,16 +59,55 @@ func NewMinecraftMuxer(listener net.Listener, timeout time.Duration) (*Minecraft
 // connection, extracts the routing hostname, and returns a SharedConn that
 // replays every consumed byte so the backend server still receives the intact
 // handshake.
+//
+// An HTTP request is routed by its Host header instead: that is how the unlock
+// link of a secure mc proxy reaches the proxy it names, on the game's own port.
 func GetMinecraftHostname(c net.Conn) (net.Conn, map[string]string, error) {
 	reqInfoMap := make(map[string]string, 1)
 	sc, rd := libnet.NewSharedConn(c)
 
-	host, err := readHandshakeServerHost(rd)
+	// Everything br reads ahead is recorded by the SharedConn and replayed too.
+	br := bufio.NewReader(rd)
+
+	var (
+		host string
+		err  error
+	)
+	if startsHTTPRequest(br) {
+		host, err = readHTTPRequestHost(br)
+	} else {
+		host, err = readHandshakeServerHost(br)
+	}
 	if err != nil {
 		return nil, reqInfoMap, err
 	}
 	reqInfoMap["Host"] = host
 	return sc, reqInfoMap, nil
+}
+
+func startsHTTPRequest(br *bufio.Reader) bool {
+	head, err := br.Peek(4)
+	if err != nil {
+		return false
+	}
+	return slices.Contains(httpRequestStarts, string(head))
+}
+
+// readHTTPRequestHost reads an HTTP request's header and returns the host it
+// is for, without the port.
+func readHTTPRequestHost(br *bufio.Reader) (string, error) {
+	req, err := http.ReadRequest(bufio.NewReader(io.LimitReader(br, maxMinecraftHandshakeSize)))
+	if err != nil {
+		return "", err
+	}
+	host := req.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "" {
+		return "", errors.New("http request without a host")
+	}
+	return host, nil
 }
 
 func minecraftFailed(c net.Conn) {

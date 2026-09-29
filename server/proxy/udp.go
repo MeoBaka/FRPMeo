@@ -98,6 +98,9 @@ type UDPProxy struct {
 	checkCloseCh chan int
 
 	isClosed bool
+
+	// knockPort is the tcp port held for secure unlock links, or 0.
+	knockPort int
 }
 
 func NewUDPProxy(baseProxy *BaseProxy) Proxy {
@@ -159,6 +162,14 @@ func (pxy *UDPProxy) Run() (remoteAddr string, err error) {
 	xl.Infof("udp proxy listen port [%d]", pxy.cfg.GetRemotePort())
 
 	pxy.udpConn = udpConn
+
+	// A datagram cannot carry a link, so a secure proxy takes unlock requests
+	// over tcp on the same port number. Done before anything is started, so a
+	// failure leaves only the socket to close.
+	if pxy.knockPort, err = pxy.listenForSecureKnocks(pxy.realBindPort); err != nil {
+		udpConn.Close()
+		return
+	}
 
 	pxy.sendCh = make(chan *msg.UDPPacket, 1024)
 
@@ -405,7 +416,7 @@ func (pxy *UDPProxy) Run() (remoteAddr string, err error) {
 	}
 
 	go func() {
-		udp.ForwardUserConn(udpConn, pxy.readCh, pxy.sendCh, int(pxy.serverCfg.UDPPacketSize), tracker, pxy.newUDPAdmitFilter(pxy.realBindPort))
+		udp.ForwardUserConnPackets(udpConn, pxy.readCh, pxy.sendCh, int(pxy.serverCfg.UDPPacketSize), tracker, pxy.newUDPPacketFilter(pxy.realBindPort))
 
 		pxy.Close()
 	}()
@@ -429,6 +440,11 @@ func (pxy *UDPProxy) Close() {
 		}
 
 		pxy.udpConn.Close()
+
+		// The knock listener itself went with BaseProxy.Close.
+		if pxy.knockPort > 0 {
+			pxy.rc.TCPPortManager.Release(pxy.knockPort)
+		}
 
 		// all channels only closed here
 

@@ -34,6 +34,7 @@ import (
 	"github.com/fatedier/frp/server/firewall"
 	"github.com/fatedier/frp/server/group"
 	"github.com/fatedier/frp/server/ports"
+	"github.com/fatedier/frp/server/secure"
 	"github.com/fatedier/frp/server/visitor"
 )
 
@@ -99,6 +100,10 @@ type ResourceController struct {
 	// (IP/CIDR + proxy + user rules), managed from the dashboard.
 
 	Firewall *firewall.Firewall
+
+	// Unlock requests for secure https proxies, which arrive on the http port
+	// for domains no http proxy serves.
+	SecureKnocks *secure.KnockRegistry
 }
 
 func (rc *ResourceController) Close() error {

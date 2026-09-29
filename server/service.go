@@ -69,6 +69,7 @@ import (
 	"github.com/fatedier/frp/server/ports"
 	"github.com/fatedier/frp/server/proxy"
 	"github.com/fatedier/frp/server/registry"
+	"github.com/fatedier/frp/server/secure"
 	"github.com/fatedier/frp/server/visitor"
 )
 
@@ -222,6 +223,8 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 			TCPPortManager: ports.NewManager("tcp", cfg.ProxyBindAddr, cfg.AllowPorts),
 
 			UDPPortManager: ports.NewManager("udp", cfg.ProxyBindAddr, cfg.AllowPorts),
+
+			SecureKnocks: secure.NewKnockRegistry(),
 		},
 
 		sshTunnelListener: netpkg.NewInternalListener(),
@@ -545,6 +548,10 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 		svr.rc.HTTPReverseProxy = rp
 
+		// Secure https proxies take their unlock links here, for domains no
+		// http proxy claims.
+		rp.SetNoRouteHandler(svr.rc.SecureKnocks.ServeNoRoute)
+
 		address := net.JoinHostPort(cfg.ProxyBindAddr, strconv.Itoa(cfg.VhostHTTPPort))
 		protocols := new(http.Protocols)
 		protocols.SetHTTP1(true)
@@ -858,9 +865,10 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 		if err = svr.completeControlLogin(ctl, func() error {
 			return writeWithDeadline(conn, connWriteTimeout, func() error {
 				return acceptedConn.conn.WriteMsg(&msg.LoginResp{
-					Version: version.Full(),
-					RunID:   ctl.runID,
-					Error:   "",
+					Version:  version.Full(),
+					RunID:    ctl.runID,
+					Error:    "",
+					Features: []string{msg.FeatureSecureProxy},
 				})
 			})
 		}); err != nil {

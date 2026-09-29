@@ -44,6 +44,10 @@ type HTTPSProxy struct {
 	*BaseProxy
 
 	cfg *v1.HTTPSProxyConfig
+
+	// knockDomains are the domains whose unlock requests this proxy's secure
+	// gate takes on frps' http port.
+	knockDomains []string
 }
 
 func NewHTTPSProxy(baseProxy *BaseProxy) Proxy {
@@ -90,6 +94,10 @@ func (pxy *HTTPSProxy) Run() (remoteAddr string, err error) {
 
 	}
 
+	if err = pxy.registerSecureKnocks(domains); err != nil {
+		return "", err
+	}
+
 	pxy.startCommonTCPListenersHandler()
 
 	remoteAddr = strings.Join(addrs, ",")
@@ -98,6 +106,8 @@ func (pxy *HTTPSProxy) Run() (remoteAddr string, err error) {
 }
 
 func (pxy *HTTPSProxy) Close() {
+	pxy.unregisterSecureKnocks()
+
 	pxy.BaseProxy.Close()
 }
 

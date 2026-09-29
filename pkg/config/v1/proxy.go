@@ -212,6 +212,10 @@ type ProxyBaseConfig struct {
 
 	HealthCheck HealthCheckConfig `json:"healthCheck,omitempty"`
 
+	// Secure locks the proxy behind a key that visitors must present.
+	// omitzero, unlike omitempty, leaves an unused struct out of the JSON.
+	Secure SecureConfig `json:"secure,omitzero"`
+
 	ProxyBackend
 }
 
@@ -225,6 +229,8 @@ func (c ProxyBaseConfig) Clone() ProxyBaseConfig {
 	out.Metadatas = maps.Clone(c.Metadatas)
 
 	out.HealthCheck = c.HealthCheck.Clone()
+
+	out.Secure = c.Secure.Clone()
 
 	out.ProxyBackend = c.ProxyBackend.Clone()
 
@@ -277,6 +283,8 @@ func (c *ProxyBaseConfig) MarshalToMsg(m *msg.NewProxy) {
 	m.Metas = c.Metadatas
 
 	m.Annotations = c.Annotations
+
+	m.Secure = c.Secure.toMsg()
 }
 
 func (c *ProxyBaseConfig) UnmarshalFromMsg(m *msg.NewProxy) {
@@ -303,6 +311,8 @@ func (c *ProxyBaseConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.Metadatas = m.Metas
 
 	c.Annotations = m.Annotations
+
+	c.Secure = secureFromMsg(m.Secure)
 }
 
 type TypedProxyConfig struct {

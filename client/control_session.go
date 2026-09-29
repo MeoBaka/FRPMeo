@@ -128,6 +128,8 @@ func (d *controlSessionDialer) Dial(previousRunID string) (*SessionContext, erro
 		Connector: newMessageConnector(connector, d.common.Transport.WireProtocol),
 
 		VnetController: d.vnetController,
+
+		ServerFeatures: loginRespMsg.Features,
 	}, nil
 }
 

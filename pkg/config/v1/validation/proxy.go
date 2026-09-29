@@ -79,7 +79,7 @@ func validateProxyBaseConfigForClient(c *v1.ProxyBaseConfig) error {
 		}
 	}
 
-	return nil
+	return validateSecureConfig(c)
 }
 
 func validateProxyBaseConfigForServer(c *v1.ProxyBaseConfig) error {
@@ -87,7 +87,7 @@ func validateProxyBaseConfigForServer(c *v1.ProxyBaseConfig) error {
 		return err
 	}
 
-	return nil
+	return validateSecureConfig(c)
 }
 
 func validateDomainConfigForClient(c *v1.DomainConfig) error {

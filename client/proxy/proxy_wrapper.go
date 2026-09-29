@@ -316,9 +316,18 @@ func (pw *Wrapper) checkWorker() {
 
 				pw.lastSendStartMsg = now
 
-				_ = pw.handler(&event.StartProxyPayload{
+				// ErrSecureUnsupported means nothing was sent, so no response is
+				// coming: fail the start here. It is retried after
+				// startErrTimeout like any start error - frps may be upgraded
+				// by then.
+				if err := pw.handler(&event.StartProxyPayload{
 					NewProxyMsg: &newProxyMsg,
-				})
+				}); isSecureUnsupported(err) {
+					pw.Phase = ProxyPhaseStartErr
+					pw.Err = err.Error()
+					pw.lastStartErr = now
+					xl.Warnf("%v", err)
+				}
 
 			}
 

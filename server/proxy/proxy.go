@@ -53,6 +53,7 @@ import (
 	"github.com/fatedier/frp/server/controller"
 	"github.com/fatedier/frp/server/firewall"
 	"github.com/fatedier/frp/server/metrics"
+	"github.com/fatedier/frp/server/secure"
 )
 
 var proxyFactoryRegistry = map[reflect.Type]func(*BaseProxy) Proxy{}
@@ -161,6 +162,11 @@ type BaseProxy struct {
 	// remembering to update this.
 
 	visitorAuthenticated bool
+
+	// gate enforces the proxy's secure access settings: nil unless they are
+	// on. Every path a visitor can take consults it - handleUserTCPConnection,
+	// the http admission check and the udp packet filter.
+	gate *secure.Gate
 
 	mu sync.RWMutex
 
@@ -517,6 +523,8 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 
 	fw := pxy.GetResourceController().Firewall
 
+	gate := pxy.gate
+
 	return func(req *http.Request) vhost.AllowDecision {
 		// Rules and the plugin hook first: those are about who is asking, and a
 
@@ -528,25 +536,24 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 			return vhost.AllowDecision{StatusCode: http.StatusForbidden}
 		}
 
-		if fw == nil {
-			return vhost.AllowDecisionOK
+		if fw != nil {
+			// X-Forwarded-For is passed raw; the firewall decides whether the
+			// peer is trusted enough for it to mean anything.
+			if v := fw.AdmitHTTP(req.RemoteAddr, req.Header.Get("X-Forwarded-For")); !v.Allowed {
+				return vhost.AllowDecision{
+					StatusCode:    http.StatusTooManyRequests,
+					RetryAfterSec: fw.RetryAfterSeconds(v),
+				}
+			}
 		}
 
-		// X-Forwarded-For is passed raw; the firewall decides whether the peer
-
-		// is trusted enough for it to mean anything.
-
-		v := fw.AdmitHTTP(req.RemoteAddr, req.Header.Get("X-Forwarded-For"))
-
-		if v.Allowed {
-			return vhost.AllowDecisionOK
+		// Secure access last: it may answer with a login page or a redirect,
+		// which only makes sense for a request everything above let through.
+		if gate != nil {
+			return gate.CheckHTTP(req)
 		}
 
-		return vhost.AllowDecision{
-			StatusCode: http.StatusTooManyRequests,
-
-			RetryAfterSec: fw.RetryAfterSeconds(v),
-		}
+		return vhost.AllowDecisionOK
 	}
 }
 
@@ -736,6 +743,22 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 		}
 
 		fw.NoteDecision(firewall.SurfaceProxy, true, "rate ok", remoteAddr)
+	}
+
+	// Secure access, still before the connection is logged: a proxy that wants
+	// a key refuses everyone who has not shown it, and answers unlock requests
+	// itself. A key line is consumed here, so the gate hands back a conn that
+	// replays only what belongs to the backend.
+	if pxy.gate != nil {
+		conn, verdict := pxy.gate.AdmitConn(userConn)
+		switch verdict {
+		case secure.Refuse:
+			netpkg.ArmReset(userConn)
+			return
+		case secure.Answered:
+			return
+		}
+		userConn = conn
 	}
 
 	// Announced here rather than in the accept loop, so the line means the
@@ -1181,6 +1204,14 @@ func NewProxy(ctx context.Context, options *Options) (pxy Proxy, err error) {
 		configurer: configurer,
 
 		wireProtocol: options.WireProtocol,
+	}
+
+	if sc := &configurer.GetBaseConfig().Secure; sc.Enable {
+		gate, gateErr := secure.NewGate(basePxy.name, configurer.GetBaseConfig().Type, sc)
+		if gateErr != nil {
+			return nil, gateErr
+		}
+		basePxy.gate = gate
 	}
 
 	factory := proxyFactoryRegistry[reflect.TypeOf(configurer)]

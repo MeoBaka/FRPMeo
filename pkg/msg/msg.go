@@ -165,6 +165,38 @@ type LoginResp struct {
 	RunID string `json:"run_id,omitempty"`
 
 	Error string `json:"error,omitempty"`
+
+	// Features lists what this frps understands beyond the base protocol, so
+	// a client can refuse to rely on something the server would silently
+	// ignore. See FeatureSecureProxy.
+	Features []string `json:"features,omitempty"`
+}
+
+// FeatureSecureProxy is advertised by an frps that enforces NewProxy.Secure.
+// An older frps drops the field without a word and would expose the proxy with
+// no lock on it, so frpc does not send a secure proxy to a server without it.
+const FeatureSecureProxy = "secure-proxy"
+
+// ProxySecure is the wire form of a proxy's secure access settings: a visitor
+// has to present "<title>: <key>" before frps forwards anything.
+type ProxySecure struct {
+	Title string `json:"title,omitempty"`
+
+	Key string `json:"key,omitempty"`
+
+	Methods []string `json:"methods,omitempty"`
+
+	UnlockSeconds int `json:"unlock_seconds,omitempty"`
+
+	AllowIPs []string `json:"allow_ips,omitempty"`
+
+	TrustedIPs []string `json:"trusted_ips,omitempty"`
+
+	MaxFailures int `json:"max_failures,omitempty"`
+
+	MaxAttemptsPerMinute int `json:"max_attempts_per_minute,omitempty"`
+
+	BanSeconds int `json:"ban_seconds,omitempty"`
 }
 
 // When frpc login success, send this message to frps for running a new proxy.
@@ -223,6 +255,9 @@ type NewProxy struct {
 	// tcpmux
 
 	Multiplexer string `json:"multiplexer,omitempty"`
+
+	// every public type; nil when secure access is off
+	Secure *ProxySecure `json:"secure,omitempty"`
 }
 
 type NewProxyResp struct {
@@ -231,6 +266,10 @@ type NewProxyResp struct {
 	RemoteAddr string `json:"remote_addr,omitempty"`
 
 	Error string `json:"error,omitempty"`
+
+	// SecureApplied confirms frps is enforcing NewProxy.Secure. frpc closes a
+	// secure proxy whose response lacks it rather than leave it open unlocked.
+	SecureApplied bool `json:"secure_applied,omitempty"`
 }
 
 type CloseProxy struct {

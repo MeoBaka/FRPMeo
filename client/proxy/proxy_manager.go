@@ -32,6 +32,7 @@ import (
 	"net"
 	"reflect"
 	"sync"
+	"sync/atomic"
 
 	"github.com/samber/lo"
 
@@ -59,6 +60,11 @@ type Manager struct {
 	encryptionKey []byte
 
 	clientCfg *v1.ClientCommonConfig
+
+	// serverSecure is whether frps advertised secure access at login. Atomic
+	// because HandleEvent reads it while a wrapper holds its own lock, where
+	// taking pm.mu could deadlock against UpdateAll.
+	serverSecure atomic.Bool
 
 	ctx context.Context
 }
@@ -146,6 +152,13 @@ func (pm *Manager) HandleEvent(payload any) error {
 	switch e := payload.(type) {
 
 	case *event.StartProxyPayload:
+
+		// An frps that does not advertise secure access would drop the
+		// settings and serve the proxy with no lock on it, so it is never sent
+		// one. The wrapper turns this into a start error.
+		if e.NewProxyMsg.Secure != nil && !pm.serverSecure.Load() {
+			return ErrSecureUnsupported
+		}
 
 		m = e.NewProxyMsg
 

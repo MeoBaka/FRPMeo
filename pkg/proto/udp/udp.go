@@ -111,6 +111,25 @@ func ForwardUserConn(
 
 	allow func(remoteAddr string, packetSize int) bool,
 ) {
+	var byPacket func(string, []byte) bool
+	if allow != nil {
+		byPacket = func(remoteAddr string, packet []byte) bool { return allow(remoteAddr, len(packet)) }
+	}
+	ForwardUserConnPackets(udpConn, readCh, sendCh, bufSize, tracker, byPacket)
+}
+
+// ForwardUserConnPackets is ForwardUserConn with a filter that sees each
+// datagram, not only its size - for a check that has to read what a packet
+// says, such as a secure proxy's unlock line. The slice is only valid during
+// the call.
+func ForwardUserConnPackets(
+	udpConn *net.UDPConn,
+	readCh <-chan *msg.UDPPacket,
+	sendCh chan<- *msg.UDPPacket,
+	bufSize int,
+	tracker *SessionTracker,
+	allow func(remoteAddr string, packet []byte) bool,
+) {
 	// read
 
 	go func() {
@@ -207,7 +226,7 @@ func ForwardUserConn(
 			return
 		}
 
-		if allow != nil && remoteAddr != nil && !allow(remoteAddr.String(), n) {
+		if allow != nil && remoteAddr != nil && !allow(remoteAddr.String(), buf[:n]) {
 			continue
 		}
 

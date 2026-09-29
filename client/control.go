@@ -70,6 +70,10 @@ type SessionContext struct {
 	// Virtual net controller
 
 	VnetController *vnet.Controller
+
+	// ServerFeatures is what frps advertised in its login response; see
+	// msg.FeatureSecureProxy.
+	ServerFeatures []string
 }
 
 type Control struct {
@@ -146,6 +150,8 @@ func NewControl(ctx context.Context, sessionCtx *SessionContext, vm *visitor.Man
 	ctl.msgTransporter = transport.NewMessageTransporter(ctl.msgDispatcher)
 
 	ctl.pm = proxy.NewManager(ctl.ctx, sessionCtx.Common, sessionCtx.Auth.EncryptionKey(), ctl.msgTransporter, sessionCtx.VnetController)
+
+	ctl.pm.SetServerFeatures(sessionCtx.ServerFeatures)
 
 	return ctl, nil
 }
@@ -248,7 +254,17 @@ func (ctl *Control) handleNewProxyResp(m msg.Message) {
 
 	proxyName := naming.StripUserPrefix(ctl.sessionCtx.Common.User, inMsg.ProxyName)
 
-	err := ctl.pm.StartProxy(proxyName, inMsg.RemoteAddr, inMsg.Error)
+	respErr := inMsg.Error
+
+	// frps has to confirm it is enforcing secure access. One that registered a
+	// secure proxy without saying so is serving it with no lock on it - a
+	// server plugin may have dropped the settings - so close it again.
+	if respErr == "" && !inMsg.SecureApplied && ctl.pm.IsSecure(proxyName) {
+		_ = ctl.msgDispatcher.Send(&msg.CloseProxy{ProxyName: inMsg.ProxyName})
+		respErr = "frps did not confirm secure access for this proxy, so it was closed rather than left unlocked"
+	}
+
+	err := ctl.pm.StartProxy(proxyName, inMsg.RemoteAddr, respErr)
 
 	if err != nil {
 		xl.Warnf("[%s] start error: %v", proxyName, err)

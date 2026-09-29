@@ -738,6 +738,9 @@ func (ctl *Control) handleNewProxy(m msg.Message) {
 			err, lo.FromPtr(ctl.sessionCtx.ServerCfg.DetailedErrorsToClient))
 	} else {
 		resp.RemoteAddr = remoteAddr
+		// The proxy was built from inMsg, so its secure settings - if any
+		// survived the NewProxy plugin - are what is being enforced now.
+		resp.SecureApplied = inMsg.Secure != nil
 		xl.Infof("new proxy [%s] type [%s] success", inMsg.ProxyName, inMsg.ProxyType)
 		clientID := ctl.sessionCtx.LoginMsg.ClientID
 		if clientID == "" {

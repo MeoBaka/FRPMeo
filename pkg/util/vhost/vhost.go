@@ -193,6 +193,14 @@ type AllowDecision struct {
 	// harder. A refusal nobody backs off from is not much of a refusal.
 
 	RetryAfterSec int
+
+	// Header is added to the reply: a Location and Set-Cookie turn a refusal
+	// into a redirect, a Content-Type describes Body.
+	Header http.Header
+
+	// Body, when set, is sent instead of the plain status text - a login page,
+	// say, where a bare "Forbidden" would leave a visitor stuck.
+	Body []byte
 }
 
 // Allowed is the decision to serve a request.
