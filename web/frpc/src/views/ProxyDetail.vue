@@ -55,6 +55,7 @@
       <ProxyFormLayout
         v-if="formData"
         :model-value="formData"
+        :remote-addr="proxy.remote_addr"
         readonly
       />
     </div>

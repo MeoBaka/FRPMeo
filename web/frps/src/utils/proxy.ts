@@ -24,6 +24,9 @@ class BaseProxy {
   multiplexer: string
   routeByHTTPUser: string
 
+  // Secure access summary; empty when it is off
+  secure: string
+
   constructor(proxyStats: any) {
     this.name = proxyStats.name
     this.type = ''
@@ -57,7 +60,27 @@ class BaseProxy {
     this.subdomain = ''
     this.multiplexer = ''
     this.routeByHTTPUser = ''
+    this.secure = describeSecure(proxyStats.conf?.secure)
   }
+}
+
+// describeSecure sums up a proxy's secure access settings in one line. frps
+// never sends the key itself, only that there is one.
+function describeSecure(s: any): string {
+  if (!s?.enable) return ''
+  const methods: string[] =
+    Array.isArray(s.methods) && s.methods.length > 0
+      ? s.methods
+      : ['link', 'http', 'line']
+  const hours = (s.unlockSeconds || 43200) / 3600
+  const parts = [
+    `title "${s.title}"`,
+    methods.join(', '),
+    `unlock ${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`,
+  ]
+  if (s.allowIPs?.length) parts.push(`${s.allowIPs.length} allowed IP(s)`)
+  if (s.trustedIPs?.length) parts.push(`${s.trustedIPs.length} trusted IP(s)`)
+  return parts.join(' · ')
 }
 
 class TCPProxy extends BaseProxy {

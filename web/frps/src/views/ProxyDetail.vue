@@ -185,6 +185,16 @@
                 }}</span>
               </div>
             </div>
+
+            <div v-if="proxy.secure" class="config-item-card">
+              <div class="config-item-icon secure">
+                <el-icon><Key /></el-icon>
+              </div>
+              <div class="config-item-content">
+                <span class="config-item-label">Secure Access</span>
+                <span class="config-item-value">{{ proxy.secure }}</span>
+              </div>
+            </div>
           </div>
 
           <!-- Annotations -->
@@ -240,6 +250,7 @@ import {
   Lightning,
   Tickets,
   Location,
+  Key,
 } from '@element-plus/icons-vue'
 import { getProxyByNameV2 } from '../api/proxy'
 import { getServerInfo } from '../api/server'
@@ -693,6 +704,15 @@ html.dark .status-badge.online {
 .config-item-icon.route {
   background: rgba(236, 72, 153, 0.1);
   color: #ec4899;
+}
+
+.config-item-icon.secure {
+  background: rgba(234, 179, 8, 0.1);
+  color: #ca8a04;
+}
+
+html.dark .config-item-icon.secure {
+  background: rgba(234, 179, 8, 0.15);
 }
 
 html.dark .config-item-icon.encryption,

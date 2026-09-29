@@ -47,6 +47,7 @@ import {
   type ProxyFormData,
   createDefaultProxyForm,
   formToStoreProxy,
+  secureLineApplies,
   storeProxyToForm,
 } from '../types'
 import { getStoreProxy } from '../api/frpc'
@@ -114,6 +115,51 @@ const rules: FormRules = {
         }
       },
       trigger: 'blur',
+    },
+  ],
+  // The secure rules mirror frpc's own validation, so a mistake shows up on
+  // the field instead of as a failed save.
+  secureTitle: [
+    {
+      validator: (_rule, value, callback) => {
+        if (form.value.secureEnable && !/^[A-Za-z0-9_-]{1,64}$/.test(value || '')) {
+          callback(new Error('1-64 letters, digits, - or _'))
+        } else {
+          callback()
+        }
+      },
+      trigger: 'blur',
+    },
+  ],
+  secureKey: [
+    {
+      validator: (_rule, value, callback) => {
+        const key: string = value || ''
+        const hasControl = [...key].some((ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f)
+        if (
+          form.value.secureEnable &&
+          (key.length < 6 || key.length > 256 || key.trim() !== key || hasControl)
+        ) {
+          callback(new Error('6-256 characters, no leading/trailing spaces or control characters'))
+        } else {
+          callback()
+        }
+      },
+      trigger: 'blur',
+    },
+  ],
+  secureMethodLink: [
+    {
+      validator: (_rule, _value, callback) => {
+        const f = form.value
+        const line = f.secureMethodLine && secureLineApplies(f.type)
+        if (f.secureEnable && !f.secureMethodLink && !f.secureMethodHTTP && !line) {
+          callback(new Error('Enable at least one way to present the key'))
+        } else {
+          callback()
+        }
+      },
+      trigger: 'change',
     },
   ],
 }

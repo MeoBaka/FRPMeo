@@ -11,6 +11,8 @@
     <ProxyAuthSection
       v-if="['http', 'tcpmux', 'stcp', 'sudp', 'xtcp', 'xudp', 'xtcp+xudp', 'stcp+sudp'].includes(form.type)"
       v-model="form" :readonly="readonly" />
+    <ProxySecureSection v-if="SECURE_PROXY_TYPES.includes(form.type)" v-model="form" :readonly="readonly"
+      :remote-addr="remoteAddr" />
     <ProxyHttpSection v-if="form.type === 'http'" v-model="form" :readonly="readonly" />
     <ProxyTransportSection v-model="form" :readonly="readonly" />
     <ProxyHealthSection v-model="form" :readonly="readonly" />
@@ -22,12 +24,13 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { ProxyFormData } from '../../types'
+import { SECURE_PROXY_TYPES, type ProxyFormData } from '../../types'
 import ConfigSection from '../ConfigSection.vue'
 import ProxyBaseSection from './ProxyBaseSection.vue'
 import ProxyRemoteSection from './ProxyRemoteSection.vue'
 import ProxyBackendSection from './ProxyBackendSection.vue'
 import ProxyAuthSection from './ProxyAuthSection.vue'
+import ProxySecureSection from './ProxySecureSection.vue'
 import ProxyHttpSection from './ProxyHttpSection.vue'
 import ProxyTransportSection from './ProxyTransportSection.vue'
 import ProxyHealthSection from './ProxyHealthSection.vue'
@@ -39,7 +42,9 @@ const props = withDefaults(defineProps<{
   modelValue: ProxyFormData
   readonly?: boolean
   editing?: boolean
-}>(), { readonly: false, editing: false })
+  // The proxy's public address from the status API, when known.
+  remoteAddr?: string
+}>(), { readonly: false, editing: false, remoteAddr: '' })
 
 const emit = defineEmits<{ 'update:modelValue': [value: ProxyFormData] }>()
 

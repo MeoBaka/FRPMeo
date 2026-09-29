@@ -1,6 +1,11 @@
 import type { ProxyType, VisitorType } from './constants'
 import type { ProxyFormData, VisitorFormData } from './proxy-form'
-import { createDefaultProxyForm, createDefaultVisitorForm } from './proxy-form'
+import {
+  SECURE_PROXY_TYPES,
+  createDefaultProxyForm,
+  createDefaultVisitorForm,
+  secureLineApplies,
+} from './proxy-form'
 import type { ProxyDefinition, VisitorDefinition } from './proxy-store'
 
 // ========================================
@@ -94,6 +99,15 @@ export function formToStoreProxy(form: ProxyFormData): ProxyDefinition {
     block.annotations = Object.fromEntries(
       form.annotations.map((a) => [a.key, a.value]),
     )
+  }
+
+  // Secure access. Written while switched off too, as long as a title or key
+  // is set, so turning it off and on again does not lose them.
+  if (
+    SECURE_PROXY_TYPES.includes(form.type) &&
+    (form.secureEnable || form.secureTitle || form.secureKey)
+  ) {
+    block.secure = secureFormToStore(form)
   }
 
   // Type-specific fields
@@ -206,6 +220,45 @@ export function formToStoreProxy(form: ProxyFormData): ProxyDefinition {
     form.type,
     block,
   )
+}
+
+function secureFormToStore(form: ProxyFormData): Record<string, any> {
+  const secure: Record<string, any> = {}
+  if (form.secureEnable) secure.enable = true
+  if (form.secureTitle) secure.title = form.secureTitle
+  if (form.secureKey) secure.key = form.secureKey
+
+  const lineApplies = secureLineApplies(form.type)
+  const methods: string[] = []
+  if (form.secureMethodLink) methods.push('link')
+  if (form.secureMethodHTTP) methods.push('http')
+  if (form.secureMethodLine && lineApplies) methods.push('line')
+  // frps reads an empty list as every method that applies, so only a narrower
+  // choice is written. The form refuses to save a secure proxy with none.
+  const available = lineApplies ? 3 : 2
+  if (methods.length > 0 && methods.length < available) secure.methods = methods
+
+  if (form.secureUnlockSeconds > 0) {
+    secure.unlockSeconds = form.secureUnlockSeconds
+  }
+  const allowIPs = form.secureAllowIPs.filter(Boolean)
+  if (allowIPs.length > 0) secure.allowIPs = allowIPs
+  const trustedIPs = form.secureTrustedIPs.filter(Boolean)
+  if (trustedIPs.length > 0) secure.trustedIPs = trustedIPs
+
+  const antiSpam: Record<string, number> = {}
+  if (form.secureMaxFailures != null) {
+    antiSpam.maxFailures = form.secureMaxFailures
+  }
+  if (form.secureMaxAttemptsPerMinute != null) {
+    antiSpam.maxAttemptsPerMinute = form.secureMaxAttemptsPerMinute
+  }
+  if (form.secureBanSeconds != null) {
+    antiSpam.banSeconds = form.secureBanSeconds
+  }
+  if (Object.keys(antiSpam).length > 0) secure.antiSpam = antiSpam
+
+  return secure
 }
 
 export function formToStoreVisitor(form: VisitorFormData): VisitorDefinition {
@@ -534,6 +587,25 @@ export function storeProxyToForm(config: ProxyDefinition): ProxyFormData {
   // XTCP NAT traversal
   form.natTraversalDisableAssistedAddrs =
     c.natTraversal?.disableAssistedAddrs || false
+
+  // Secure access
+  if (c.secure) {
+    const s = c.secure
+    form.secureEnable = s.enable === true
+    form.secureTitle = s.title || ''
+    form.secureKey = s.key || ''
+    // An empty list means every method.
+    const methods: string[] = Array.isArray(s.methods) ? s.methods : []
+    form.secureMethodLink = methods.length === 0 || methods.includes('link')
+    form.secureMethodHTTP = methods.length === 0 || methods.includes('http')
+    form.secureMethodLine = methods.length === 0 || methods.includes('line')
+    form.secureUnlockSeconds = s.unlockSeconds || 0
+    form.secureAllowIPs = Array.isArray(s.allowIPs) ? s.allowIPs : []
+    form.secureTrustedIPs = Array.isArray(s.trustedIPs) ? s.trustedIPs : []
+    form.secureMaxFailures = s.antiSpam?.maxFailures
+    form.secureMaxAttemptsPerMinute = s.antiSpam?.maxAttemptsPerMinute
+    form.secureBanSeconds = s.antiSpam?.banSeconds
+  }
 
   return form
 }

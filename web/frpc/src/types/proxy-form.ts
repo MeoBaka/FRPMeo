@@ -64,6 +64,42 @@ export interface ProxyFormData {
 
   // MC/PE specific (fork Minecraft types): pe hostname -> local backend map
   forcedHosts: Array<{ key: string; value: string }>
+
+  // Secure access (SecureConfig) - every type in SECURE_PROXY_TYPES
+  secureEnable: boolean
+  secureTitle: string
+  secureKey: string
+  secureMethodLink: boolean
+  secureMethodHTTP: boolean
+  secureMethodLine: boolean
+  secureUnlockSeconds: number
+  secureAllowIPs: string[]
+  secureTrustedIPs: string[]
+  secureMaxFailures: number | undefined
+  secureMaxAttemptsPerMinute: number | undefined
+  secureBanSeconds: number | undefined
+}
+
+// The proxy types secure access applies to. The visitor types (stcp, xtcp and
+// friends) already make every caller prove a secretKey, so frps rejects it
+// there.
+export const SECURE_PROXY_TYPES: ProxyType[] = [
+  'tcp',
+  'udp',
+  'http',
+  'https',
+  'tcpmux',
+  'tcp+udp',
+  'mc',
+  'pe',
+]
+
+// secureLineApplies reports whether visitors of this type can send the key as
+// the first line (or, for udp and pe, as a datagram). frps only ever sees an
+// HTTP request or a TLS stream on http and https, and routes mc by the hostname
+// in the handshake, which a key line lacks - it rejects the method on all three.
+export function secureLineApplies(type: ProxyType): boolean {
+  return type !== 'http' && type !== 'https' && type !== 'mc'
 }
 
 export interface VisitorFormData {
@@ -148,6 +184,19 @@ export function createDefaultProxyForm(): ProxyFormData {
     forcedHosts: [],
 
     natTraversalDisableAssistedAddrs: false,
+
+    secureEnable: false,
+    secureTitle: '',
+    secureKey: '',
+    secureMethodLink: true,
+    secureMethodHTTP: true,
+    secureMethodLine: true,
+    secureUnlockSeconds: 0,
+    secureAllowIPs: [],
+    secureTrustedIPs: [],
+    secureMaxFailures: undefined,
+    secureMaxAttemptsPerMinute: undefined,
+    secureBanSeconds: undefined,
   }
 }
 

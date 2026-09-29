@@ -31,6 +31,7 @@ declare module 'vue' {
     ProxyMetadataSection: typeof import('./src/components/proxy-form/ProxyMetadataSection.vue')['default']
     ProxyNatSection: typeof import('./src/components/proxy-form/ProxyNatSection.vue')['default']
     ProxyRemoteSection: typeof import('./src/components/proxy-form/ProxyRemoteSection.vue')['default']
+    ProxySecureSection: typeof import('./src/components/proxy-form/ProxySecureSection.vue')['default']
     ProxyTransportSection: typeof import('./src/components/proxy-form/ProxyTransportSection.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
