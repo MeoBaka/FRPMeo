@@ -63,23 +63,12 @@ type Server struct {
 
 	authMiddleware mux.MiddlewareFunc
 
-	// connFilter, when set, decides which peers get as far as the handshake.
-
-	// See SetConnFilter.
-
-	connFilter func(remoteAddr string) bool
-
 	// auth is kept so the failure hook can be attached after construction.
 
 	auth *netpkg.HTTPAuthMiddleware
 
 	// guard is the allow list and the failed-login ban, nil when the config
-
-	// asked for neither. It runs ahead of connFilter: being on the list is a
-
-	// question about who the peer is, and there is no point asking anything
-
-	// else of somebody who is not.
+	// asked for neither.
 
 	guard *guard.Guard
 }
@@ -186,8 +175,8 @@ func NewServer(cfg v1.WebServerConfig) (*Server, error) {
 
 //
 
-// Separate from SetConnFilter because it answers a different question: the
-// filter decides whether a peer may reach the handshake at all, this reports
+// Separate from the allow list because it answers a different question: the
+// list decides whether a peer may reach the handshake at all, this reports
 // what the peer turned out to be once it got there. A wrong password is the
 // clearest evidence this port produces - nobody who belongs here gets it wrong
 // again and again - so it is worth acting on with far less patience than a
@@ -214,45 +203,6 @@ func (s *Server) Address() string {
 	return s.addr
 }
 
-// SetHandshakeByteLimit caps how much a peer may send before it has finished
-// asking for something - the request line and headers, and the TLS handshake
-// underneath them when the dashboard serves https.
-//
-// The same measurement the control port makes, in the form net/http already
-// offers. A peer that opens a connection and pushes megabytes of headers costs
-// the memory a pending request holds while breaking no rate at all: one
-// connection is one connection however much it carries.
-//
-// Zero leaves net/http's own default in place. Must be called before Run.
-func (s *Server) SetHandshakeByteLimit(n int) {
-	if n <= 0 {
-		return
-	}
-	s.hs.MaxHeaderBytes = n
-}
-
-// SetConnFilter installs a check run on every accepted connection. It is asked
-
-// before the TLS handshake and before a single byte is read, so a peer it turns
-
-// away costs nothing beyond the accept itself - which is also why it is the
-
-// only place a rejection can stop the handshake noise rather than add to it.
-
-//
-
-// It reports only whether to admit the peer: what to say about a rejection, and
-
-// how loudly, belongs to whoever knows why the answer was no.
-
-//
-
-// Must be called before Run.
-
-func (s *Server) SetConnFilter(allow func(remoteAddr string) bool) {
-	s.connFilter = allow
-}
-
 func (s *Server) Run() error {
 	ln := s.ln
 
@@ -260,8 +210,8 @@ func (s *Server) Run() error {
 
 	// have been handed to a handshake first.
 
-	if s.guard != nil || s.connFilter != nil {
-		ln = &filteredListener{Listener: ln, guard: s.guard, allow: s.connFilter}
+	if s.guard != nil {
+		ln = &filteredListener{Listener: ln, allow: s.guard.Allow}
 	}
 
 	if s.tlsCfg != nil {
@@ -278,8 +228,6 @@ func (s *Server) Run() error {
 type filteredListener struct {
 	net.Listener
 
-	guard *guard.Guard
-
 	allow func(remoteAddr string) bool
 }
 
@@ -293,7 +241,7 @@ func (l *filteredListener) Accept() (net.Conn, error) {
 
 		addr := c.RemoteAddr().String()
 
-		if l.guard.Allow(addr) && (l.allow == nil || l.allow(addr)) {
+		if l.allow(addr) {
 			return c, nil
 		}
 

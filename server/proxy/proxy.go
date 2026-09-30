@@ -51,7 +51,6 @@ import (
 	"github.com/fatedier/frp/pkg/util/vhost"
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server/controller"
-	"github.com/fatedier/frp/server/firewall"
 	"github.com/fatedier/frp/server/metrics"
 	"github.com/fatedier/frp/server/secure"
 )
@@ -142,26 +141,6 @@ type BaseProxy struct {
 	// serve the same peer: tcp+udp, stcp+sudp and xtcp+xudp. See trackPeers.
 
 	peers *peerTracker
-
-	// visitorAuthenticated marks the proxy types whose callers had to prove a
-
-	// shared secret before their connection got this far (stcp, sudp, xtcp+xudp
-
-	// and friends). Rate limiting is skipped for them: the secret already says
-
-	// who they are, so the only thing a limit could do is throttle a tunnel that
-
-	// legitimately opens many connections.
-
-	//
-
-	// Set by startVisitorListener rather than matched against a list of type
-
-	// names, so a visitor type added later is covered without anyone
-
-	// remembering to update this.
-
-	visitorAuthenticated bool
 
 	// gate enforces the proxy's secure access settings: nil unless they are
 	// on. Every path a visitor can take consults it - handleUserTCPConnection,
@@ -341,12 +320,6 @@ func (pxy *BaseProxy) startVisitorListener(secretKey string, allowUsers []string
 		return err
 	}
 
-	// Everything arriving on this listener has already satisfied secretKey and
-
-	// allowUsers, so it is exempt from rate limiting.
-
-	pxy.visitorAuthenticated = true
-
 	pxy.listeners = append(pxy.listeners, listener)
 
 	pxy.xl.Infof("%s proxy custom listen success", proxyType)
@@ -420,9 +393,9 @@ func (pxy *BaseProxy) startCommonTCPListenersHandler() {
 
 				// Logged inside handleUserTCPConnection, once the connection
 				// has been admitted. Announcing it here would mean a line per
-				// connection including every one the firewall is about to
-				// refuse - so a flood being turned away would still cost a
-				// flood of writes to the log.
+				// connection including every one about to be refused - so a
+				// flood being turned away would still cost a flood of writes
+				// to the log.
 
 				go pxy.handleUserTCPConnection(c)
 
@@ -450,42 +423,6 @@ const (
 	admitVerdictMax = 4096
 )
 
-// newUDPAdmitFilter returns a per-source admission predicate for the UDP
-
-// proxies (udp, pe, and the UDP half of tcp+udp), which have their own read
-
-// loop and never reach handleUserTCPConnection. port is the frps-side port they
-
-// listen on. Verdicts are always cached: this runs per packet.
-
-//
-
-// Rate limiting is deliberately not cached alongside them. A cached admission
-
-// says "this source was allowed a moment ago", which is the right answer for a
-
-// rule or a plugin - they cannot change their mind about the same source - but
-
-// the whole job of a rate is to say yes and then, a few packets later, no.
-
-func (pxy *BaseProxy) newUDPAdmitFilter(port int) func(string, int) bool {
-	base := pxy.newAdmitFilter("udp", port, admitVerdictTTL)
-
-	fw := pxy.GetResourceController().Firewall
-
-	if base == nil && fw == nil {
-		return nil
-	}
-
-	return func(remoteAddr string, packetSize int) bool {
-		if base != nil && !base(remoteAddr) {
-			return false
-		}
-
-		return fw == nil || fw.AdmitUDP(remoteAddr, packetSize)
-	}
-}
-
 // newHTTPAdmitFilter returns a per-request admission predicate for http
 
 // proxies, which the vhost reverse proxy serves without ever reaching
@@ -500,55 +437,25 @@ func (pxy *BaseProxy) newUDPAdmitFilter(port int) func(string, int) bool {
 
 //
 
-// port is the shared vhost http port. Every http proxy answers on it, so a rule
-
-// or plugin naming that port covers all of them rather than one.
+// port is the shared vhost http port. Every http proxy answers on it, so a
+// plugin naming that port covers all of them rather than one.
 
 func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
-	// With no plugin the check is a local lookup - cheap enough to repeat per
-
-	// request, which keeps rule changes immediate. A plugin turns each request
-
-	// into an http round trip, which a busy site would not survive, so verdicts
-
-	// get cached instead.
-
-	ttl := time.Duration(0)
-
-	if pm := pxy.GetResourceController().PluginManager; pm != nil && pm.HasNewUserConnPlugins() {
-		ttl = admitVerdictTTL
-	}
-
-	base := pxy.newAdmitFilter("conn", port, ttl)
-
-	fw := pxy.GetResourceController().Firewall
+	// A plugin turns each request into an http round trip, which a busy site
+	// would not survive, so its verdicts are cached.
+	base := pxy.newAdmitFilter("conn", port, admitVerdictTTL)
 
 	gate := pxy.gate
 
 	return func(req *http.Request) vhost.AllowDecision {
-		// Rules and the plugin hook first: those are about who is asking, and a
-
-		// peer with no business here should be told so rather than invited back
-
-		// with a Retry-After.
-
+		// The plugin hook first: it is about who is asking, and a peer with no
+		// business here should be told so before being offered a login page.
 		if base != nil && !base(req.RemoteAddr) {
 			return vhost.AllowDecision{StatusCode: http.StatusForbidden}
 		}
 
-		if fw != nil {
-			// X-Forwarded-For is passed raw; the firewall decides whether the
-			// peer is trusted enough for it to mean anything.
-			if v := fw.AdmitHTTP(req.RemoteAddr, req.Header.Get("X-Forwarded-For")); !v.Allowed {
-				return vhost.AllowDecision{
-					StatusCode:    http.StatusTooManyRequests,
-					RetryAfterSec: fw.RetryAfterSeconds(v),
-				}
-			}
-		}
-
 		// Secure access last: it may answer with a login page or a redirect,
-		// which only makes sense for a request everything above let through.
+		// which only makes sense for a request the hook let through.
 		if gate != nil {
 			return gate.CheckHTTP(req)
 		}
@@ -562,14 +469,6 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 // handleUserTCPConnection: the NewUserConn plugin hook. Returns nil when no
 
 // such plugin is configured, so those paths pay nothing.
-
-//
-
-// The rate limit is not part of this. It counts per source and per packet on
-
-// the udp path, which a cached per-address verdict would defeat; those paths
-
-// call AdmitUDP directly instead.
 
 //
 
@@ -702,49 +601,6 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 	// is left in TIME_WAIT - the deferred Close above does the closing, this
 	// only changes how.
 
-	if fw := rc.Firewall; fw != nil {
-
-		// Decisions are counted by the monitor's own reporter rather than
-		// logged one per connection: a rejection here is common enough that a
-		// line each turns a flood into a second flood against the disk.
-
-		// Rate limiting is skipped for the visitor-authenticated types, which
-		// proved a shared secret to get here - see
-		// BaseProxy.visitorAuthenticated.
-
-		if !pxy.visitorAuthenticated {
-			if v := fw.AdmitTCP(remoteAddr); !v.Allowed {
-
-				fw.NoteDecision(firewall.SurfaceProxy, false, v.Reason, remoteAddr)
-
-				netpkg.ArmReset(userConn)
-
-				return
-
-			}
-
-			// Held for as long as the connection is, which is the point: the
-			// rate tiers count connections being made, and a peer that opens a
-			// thousand and then goes quiet breaks no rate at all.
-
-			ok, release := fw.AcquireConn(remoteAddr)
-			if !ok {
-
-				fw.NoteDecision(firewall.SurfaceProxy, false, "concurrency cap", remoteAddr)
-
-				netpkg.ArmReset(userConn)
-
-				return
-
-			}
-
-			defer release()
-
-		}
-
-		fw.NoteDecision(firewall.SurfaceProxy, true, "rate ok", remoteAddr)
-	}
-
 	// Secure access, still before the connection is logged: a proxy that wants
 	// a key refuses everyone who has not shown it, and answers unlock requests
 	// itself. A key line is consumed here, so the gate hands back a conn that
@@ -857,8 +713,6 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 	closed := pxy.openUserConn(content.RemoteAddr)
 
-	started := time.Now()
-
 	inCount, outCount, _ := pxy.joinUserConnection(local, userConn, proxyType, xl)
 
 	closed()
@@ -866,22 +720,6 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 	metrics.Server.AddTrafficIn(name, proxyType, inCount)
 
 	metrics.Server.AddTrafficOut(name, proxyType, outCount)
-
-	// What the connection turned out to be can only be known now that it is
-
-	// over, and the same two numbers answer both questions the firewall has:
-
-	// one that lasted and carried traffic earns its source an exemption, while
-
-	// a string of them that carried nothing is somebody seeing what is
-
-	// listening. Visitor-authenticated proxies are left out for the same reason
-
-	// they skip the rate limit - their callers already proved a secret.
-
-	if fw := rc.Firewall; fw != nil && !pxy.visitorAuthenticated {
-		fw.NoteConnectionClosed(remoteAddr, time.Since(started), inCount+outCount)
-	}
 
 	xl.Debugf("join connections closed")
 }

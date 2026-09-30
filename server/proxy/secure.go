@@ -25,24 +25,24 @@ import (
 // unlocked through frps' http port, when frps has none.
 var errSecureNoHTTPPort = errors.New("secure: https proxies take unlock links on frps' http port - set vhostHTTPPort on frps, or add trustedIPs")
 
-// newUDPPacketFilter is newUDPAdmitFilter plus secure access, which has to see
-// each datagram rather than its size: an unlock can arrive as one.
+// newUDPPacketFilter is the per-packet admission check of the udp proxies (udp,
+// pe and the udp half of tcp+udp), which have their own read loop and never
+// reach handleUserTCPConnection. port is the frps-side port they listen on.
+//
+// The NewUserConn plugin hook goes first, its verdicts cached because this runs
+// per packet; then secure access, which has to see the datagram itself since an
+// unlock can arrive as one.
 func (pxy *BaseProxy) newUDPPacketFilter(port int) func(string, []byte) bool {
-	admit := pxy.newUDPAdmitFilter(port)
+	admit := pxy.newAdmitFilter("udp", port, admitVerdictTTL)
 	gate := pxy.gate
-	switch {
-	case gate == nil && admit == nil:
+	if admit == nil && gate == nil {
 		return nil
-	case gate == nil:
-		return func(remoteAddr string, packet []byte) bool {
-			return admit(remoteAddr, len(packet))
-		}
 	}
 	return func(remoteAddr string, packet []byte) bool {
-		if admit != nil && !admit(remoteAddr, len(packet)) {
+		if admit != nil && !admit(remoteAddr) {
 			return false
 		}
-		return gate.AdmitPacket(remoteAddr, packet)
+		return gate == nil || gate.AdmitPacket(remoteAddr, packet)
 	}
 }
 

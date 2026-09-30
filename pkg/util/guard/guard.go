@@ -16,13 +16,9 @@
 // admin api - with the two things such a port actually needs: a list of who may
 // reach it at all, and a ban for whoever keeps guessing the password.
 //
-// Deliberately much smaller than the firewall frps runs on its public ports.
-// That one has to sort strangers from visitors on a port the whole internet is
-// invited to, which needs sliding windows, subnet tiers and reputation. A
-// management port has a handful of legitimate clients and everybody else is
-// wrong, so an allow list does almost all of the work and the rest is counting
-// failed logins. Reaching for the larger machinery here would be answering a
-// question nobody asked.
+// Deliberately small. A management port has a handful of legitimate clients
+// and everybody else is wrong, so an allow list does almost all of the work and
+// the rest is counting failed logins.
 package guard
 
 import (

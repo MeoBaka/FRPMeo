@@ -41,22 +41,6 @@ import (
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
 
-// AllowFunc decides whether a peer may open an ssh connection at all. It is
-
-// handed in rather than reached for: the anti-bot layer lives in the server,
-
-// and the gateway has no business knowing about it.
-
-//
-
-// An empty reason on a rejection means "do not log this one". Rate limiting
-
-// uses it: rejections there arrive in bulk by definition, and a line each would
-
-// turn a flood being refused into a flood of its own against the disk.
-
-type AllowFunc func(remoteAddr string) (ok bool, reason string)
-
 type Gateway struct {
 	bindPort int
 
@@ -65,24 +49,12 @@ type Gateway struct {
 	peerServerListener *netpkg.InternalListener
 
 	sshConfig *ssh.ServerConfig
-
-	// allow is consulted before anything is read from a peer. nil means no
-
-	// firewall is configured, and every peer is let through.
-
-	allow AllowFunc
-
-	// handshakeByteLimit is read per connection so a change made through the
-	// dashboard reaches the next peer, not the next restart.
-	handshakeByteLimit func() int
 }
 
 func NewGateway(
 	cfg v1.SSHTunnelGateway, bindAddr string,
 
 	peerServerListener *netpkg.InternalListener,
-
-	allow AllowFunc,
 ) (*Gateway, error) {
 	sshConfig := &ssh.ServerConfig{}
 
@@ -160,8 +132,6 @@ func NewGateway(
 
 		ln: ln,
 
-		allow: allow,
-
 		peerServerListener: peerServerListener,
 
 		sshConfig: sshConfig,
@@ -176,30 +146,6 @@ func (g *Gateway) Run() {
 			return
 		}
 
-		// Before the ssh handshake, not after: this port reaches the same
-
-		// tunneling as the control port, so a peer the anti-bot layer has
-
-		// turned away there must not get a second door here.
-
-		if g.allow != nil {
-			if ok, reason := g.allow(conn.RemoteAddr().String()); !ok {
-
-				if reason != "" {
-					log.Warnf("[FW] reject ssh %s reason: %s", conn.RemoteAddr(), reason)
-				}
-
-				// RST, so a refusal leaves no TIME_WAIT socket behind.
-
-				netpkg.ArmReset(conn)
-
-				conn.Close()
-
-				continue
-
-			}
-		}
-
 		go g.handleConn(conn)
 
 	}
@@ -209,22 +155,12 @@ func (g *Gateway) Close() error {
 	return g.ln.Close()
 }
 
-// SetHandshakeByteLimit installs the source of the per-connection ceiling on
-// what a peer may send before its ssh handshake completes. Must be called
-// before Run.
-func (g *Gateway) SetHandshakeByteLimit(fn func() int) {
-	g.handshakeByteLimit = fn
-}
-
 func (g *Gateway) handleConn(conn net.Conn) {
 	defer conn.Close()
 
 	ts, err := NewTunnelServer(conn, g.sshConfig, g.peerServerListener)
 	if err != nil {
 		return
-	}
-	if g.handshakeByteLimit != nil {
-		ts.handshakeByteLimit = g.handshakeByteLimit()
 	}
 
 	if err := ts.Run(); err != nil {

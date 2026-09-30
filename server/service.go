@@ -64,7 +64,6 @@ import (
 	"github.com/fatedier/frp/pkg/util/vhost"
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server/controller"
-	"github.com/fatedier/frp/server/firewall"
 	"github.com/fatedier/frp/server/group"
 	"github.com/fatedier/frp/server/ports"
 	"github.com/fatedier/frp/server/proxy"
@@ -246,83 +245,6 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		webServer.RouteRegister(svr.registerRouteHandlers)
 	}
 
-	// Anti-bot layer for user connections (settings managed from the
-
-	// dashboard, persisted to a JSON file next to frps).
-
-	var fwErr error
-
-	if svr.rc.Firewall, fwErr = firewall.New("frps_firewall.json"); fwErr != nil {
-		return nil, fmt.Errorf("init firewall: %v", fwErr)
-	}
-
-	// The dashboard opens a port of its own, which nothing else guards.
-
-	//
-
-	// This has to come after the firewall exists, not with the rest of the
-
-	// webServer setup above: svr.rc.Firewall is nil until the line above runs,
-
-	// so a filter installed there would be skipped and the port would be left
-
-	// open however the dashboard was configured.
-
-	//
-
-	// Decisions go to the firewall's own reporter rather than a log line each:
-
-	// an exposed port is scanned continuously, and a line per probe would be
-
-	// the same flood the firewall was turned on to stop.
-
-	if webServer != nil && svr.rc.Firewall != nil {
-
-		fw := svr.rc.Firewall
-
-		// The same ceiling the control port applies, in the form net/http
-
-		// offers: how much a peer may send before it has finished asking for
-
-		// anything. Read once here rather than per connection, because
-
-		// net/http takes it at construction - a later change through the
-
-		// dashboard reaches the control port immediately and this one after a
-
-		// restart.
-
-		webServer.SetHandshakeByteLimit(fw.HandshakeByteLimit())
-
-		webServer.SetConnFilter(func(remoteAddr string) bool {
-			// The dashboard is a login form, so the rate limit is what answers
-			// password guessing here.
-
-			if v := fw.AdmitWeb(remoteAddr); !v.Allowed {
-				fw.NoteDecision(firewall.SurfaceWeb, false, v.Reason, remoteAddr)
-
-				return false
-			}
-
-			fw.NoteDecision(firewall.SurfaceWeb, true, "rate ok", remoteAddr)
-
-			return true
-		})
-
-		// And a wrong password counts as a strike, which is the same evidence
-		// as a wrong protocol on the control port: nobody who belongs here gets
-		// it wrong again and again. The rate limit above still has to guess
-		// where normal ends; this does not, so it is what actually stops a
-		// guesser rather than slowing one down.
-
-		webServer.SetOnAuthFail(func(remoteAddr string) {
-			log.Debugf("[FW] dashboard login failed from %s", remoteAddr)
-
-			svr.rc.Firewall.ReportProtocolFailure(remoteAddr)
-		})
-
-	}
-
 	// Create tcpmux httpconnect multiplexer.
 
 	if cfg.TCPMuxHTTPConnectPort > 0 {
@@ -406,23 +328,6 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		return nil, fmt.Errorf("create server listener error, %v", err)
 	}
 
-	// The rate limit goes in front of the multiplexer rather than behind it.
-	// Everything the multiplexer hands on has already had its opening bytes
-	// read, under a timeout, on a goroutine spawned per connection without a
-	// bound - so a check placed after it never sees a silent peer at all. See
-	// firewall.GuardControl.
-
-	// Unless the vhost muxers share this port, in which case nothing can be
-	// decided here: the rest of what arrives is a tunneled site's visitors, and
-	// the control rate limit is not sized for those. It goes on the control
-	// listeners below instead, once the multiplexer has told the two apart.
-
-	sharedWithVhost := httpMuxOn || httpsMuxOn
-
-	if svr.rc.Firewall != nil && !sharedWithVhost {
-		ln = svr.rc.Firewall.GuardControl(ln)
-	}
-
 	svr.muxer = mux.NewMux(ln)
 
 	svr.muxer.SetKeepAlive(time.Duration(cfg.Transport.TCPKeepAlive) * time.Second)
@@ -446,14 +351,6 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		svr.kcpListener, err = netpkg.ListenKcp(address)
 		if err != nil {
 			return nil, fmt.Errorf("listen on kcp udp address %s error: %v", address, err)
-		}
-
-		// Guarded like the tcp port. It is the one other listener clients dial
-		// directly, and it is not behind the multiplexer, so this is where its
-		// firewall check lives now that admitAndServe no longer runs one.
-
-		if svr.rc.Firewall != nil {
-			svr.kcpListener = svr.rc.Firewall.GuardControl(svr.kcpListener)
 		}
 
 		log.Infof("frps kcp listen on udp %s", address)
@@ -485,41 +382,9 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 	if cfg.SSHTunnelGateway.BindPort > 0 {
 
-		// The gateway opens a port of its own, so it needs the rate limit in
-
-		// its own hands: connections there never pass through HandleListener.
-
-		var allowSSH ssh.AllowFunc
-
-		if fw := svr.rc.Firewall; fw != nil {
-			allowSSH = func(remoteAddr string) (bool, string) {
-				if v := fw.AdmitSSH(remoteAddr); !v.Allowed {
-					fw.NoteDecision(firewall.SurfaceSSH, false, v.Reason, remoteAddr)
-
-					// An empty reason asks the gateway not to log this one: the
-					// monitor's own reporter covers it, and under a flood a line
-					// per rejection is a second flood.
-
-					return false, ""
-				}
-
-				fw.NoteDecision(firewall.SurfaceSSH, true, "rate ok", remoteAddr)
-
-				return true, "rate ok"
-			}
-		}
-
-		sshGateway, err := ssh.NewGateway(cfg.SSHTunnelGateway, cfg.BindAddr, svr.sshTunnelListener, allowSSH)
+		sshGateway, err := ssh.NewGateway(cfg.SSHTunnelGateway, cfg.BindAddr, svr.sshTunnelListener)
 		if err != nil {
 			return nil, fmt.Errorf("create ssh gateway error: %v", err)
-		}
-
-		// Read per connection, so a change made through the dashboard reaches
-
-		// the next peer rather than the next restart.
-
-		if fw := svr.rc.Firewall; fw != nil {
-			sshGateway.SetHandshakeByteLimit(fw.HandshakeByteLimit)
 		}
 
 		svr.sshTunnelGateway = sshGateway
@@ -626,21 +491,6 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		return int(data[0]) == netpkg.FRPTLSHeadByte || int(data[0]) == 0x16
 	})
 
-	// The other half of the split made above the multiplexer. These three are
-	// what it sorts client control traffic into, so this is the first point on
-	// a shared port where the control rate limit can be applied to clients
-	// without also applying it to a tunneled site's visitors.
-
-	if sharedWithVhost && svr.rc.Firewall != nil {
-
-		svr.listener = svr.rc.Firewall.GuardControl(svr.listener)
-
-		svr.websocketListener = svr.rc.Firewall.GuardControl(svr.websocketListener)
-
-		svr.tlsListener = svr.rc.Firewall.GuardControl(svr.tlsListener)
-
-	}
-
 	// Create nat hole controller.
 
 	nc, err := nathole.NewController(time.Duration(cfg.NatHoleAnalysisDataReserveHours) * time.Hour)
@@ -738,14 +588,6 @@ func (svr *Service) Close() error {
 		svr.sshTunnelGateway.Close()
 	}
 
-	// Takes frps back out of the host firewall, if it ever put itself in.
-	// Addresses left in a kernel set would outlive the bans that put them
-	// there, blocked with nothing left running to explain why.
-
-	if svr.rc.Firewall != nil {
-		svr.rc.Firewall.CloseKernelBan()
-	}
-
 	svr.rc.Close()
 
 	svr.muxer.Close()
@@ -762,23 +604,7 @@ func (svr *Service) Close() error {
 func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, internal bool) {
 	xl := xlog.FromContextSafe(ctx)
 
-	// Reading the login is the last step before frps knows who this is, and it
-	// is the only one the quic listener has - quic did its own tls, so nothing
-	// upstream of here capped it. Capping it here covers every transport that
-	// speaks frp: tcp, kcp, websocket, tls and quic alike.
-
-	doneHandshake := func() {}
-
-	if svr.rc.Firewall != nil {
-		conn, doneHandshake = netpkg.LimitHandshake(conn, svr.rc.Firewall.HandshakeByteLimit())
-	}
-
 	acceptedConn, err := svr.acceptConnection(ctx, conn)
-
-	// Lifted before anything is served, for the reason it is everywhere else:
-	// the tunnel's bytes are not the handshake's.
-
-	doneHandshake()
 
 	if err != nil {
 
@@ -1104,40 +930,6 @@ func (ac *acceptedConnection) handleClientHello(conn net.Conn, wireConn *wire.Co
 	return nil
 }
 
-// localPort is the port a connection landed on, which is what a firewall rule
-
-// names. Returns 0 when the address carries no port.
-
-func localPort(addr net.Addr) int {
-	if addr == nil {
-		return 0
-	}
-
-	switch a := addr.(type) {
-
-	case *net.TCPAddr:
-
-		return a.Port
-
-	case *net.UDPAddr:
-
-		return a.Port
-
-	}
-
-	_, port, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return 0
-	}
-
-	n, err := strconv.Atoi(port)
-	if err != nil {
-		return 0
-	}
-
-	return n
-}
-
 // HandleListener accepts connections from client and call handleConnection to handle them.
 
 // If internal is true, it means that this listener is used for internal communication like ssh tunnel gateway.
@@ -1152,9 +944,6 @@ func localPort(addr net.Addr) int {
 // held up every other client for the whole read timeout. Handling it
 // concurrently fixes that; a bound is what stops the fix from being its own
 // problem, because a flood would otherwise become one goroutine per connection.
-//
-// The firewall is not part of this stage any more - it runs on the raw
-// listener, before the multiplexer, so most of a flood never reaches here.
 //
 // At the limit new connections are refused outright. Turning somebody away
 // quickly is a better answer than queueing them behind work that is already not
@@ -1214,12 +1003,6 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 // admitAndServe runs the checks that may block, then hands the connection on.
 // Called on its own goroutine - see maxPendingHandshakes for why.
 func (svr *Service) admitAndServe(c net.Conn, internal bool, release func()) {
-	// No firewall check here. Every listener that carries real remote peers is
-	// wrapped by firewall.GuardControl at the point it is created, which is
-	// upstream of the protocol multiplexer and so upstream of this. Checking
-	// again would count one connection twice against the rate limit and halve
-	// every configured limit.
-
 	// inject xlog object into net.Conn context
 
 	xl := xlog.New()
@@ -1242,44 +1025,11 @@ func (svr *Service) admitAndServe(c net.Conn, internal bool, release func()) {
 			err error
 		)
 
-		// Shortened while under attack: a peer that opens a connection and
-		// says nothing holds a socket for the whole timeout, and that is
-		// what a slow flood is made of.
-
-		timeout := connReadTimeout
-
-		// And bounded by size as well as by time. A peer that opens a
-		// connection and then pushes megabytes without ever identifying itself
-		// breaks no rate at all - one connection is one connection - but it
-		// does spend the memory a pending handshake holds.
-
-		doneHandshake := func() {}
-
-		if svr.rc.Firewall != nil {
-			timeout = svr.rc.Firewall.HandshakeTimeout(timeout)
-
-			c, doneHandshake = netpkg.LimitHandshake(c, svr.rc.Firewall.HandshakeByteLimit())
-		}
-
-		c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, timeout)
-
-		// Lifted as soon as the peer has identified itself, and not deferred:
-		// serving runs to the end of this function, so a deferred lift would
-		// leave the cap in force for the whole life of the tunnel.
-
-		doneHandshake()
+		c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, connReadTimeout)
 
 		if err != nil {
 
 			log.Warnf("client conn [%s] failed the TLS check: %v", originConn.RemoteAddr(), err)
-
-			// Not an frpc having a bad day: something that does not speak
-			// the protocol at all. Worth more than any amount of counting,
-			// so it goes straight to the strike ledger.
-
-			if svr.rc.Firewall != nil {
-				svr.rc.Firewall.ReportProtocolFailure(originConn.RemoteAddr().String())
-			}
 
 			netpkg.ArmReset(originConn)
 
@@ -1359,29 +1109,6 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 
 		}
 
-		// Rate limit: turn a flooding client away before any stream is accepted.
-
-		if fw := svr.rc.Firewall; fw != nil {
-
-			remoteAddr := c.RemoteAddr().String()
-
-			// The same reporting as the tcp listener, so a flood over quic is
-			// not the one that goes unmentioned. No RST to arm here - quic
-			// closes without leaving TIME_WAIT behind.
-
-			if v := fw.AdmitControl(remoteAddr); !v.Allowed {
-
-				fw.NoteDecision(firewall.SurfaceControl, false, v.Reason, remoteAddr)
-
-				_ = c.CloseWithError(0, "")
-
-				continue
-
-			}
-
-			fw.NoteDecision(firewall.SurfaceControl, true, "rate ok", remoteAddr)
-		}
-
 		// Start a new goroutine to handle connection.
 
 		go func(ctx context.Context, frpConn *quic.Conn) {
@@ -1451,14 +1178,6 @@ func (svr *Service) RegisterControl(
 	}
 
 	if err := authVerifier.VerifyLogin(loginMsg); err != nil {
-
-		// A wrong token is the same class of evidence as a wrong protocol: an
-		// frpc that belongs here knows the secret. Internal connections - the
-		// ssh gateway's own pipe - are exempt, having never been remote peers.
-
-		if !internal && svr.rc.Firewall != nil && ctlConn != nil {
-			svr.rc.Firewall.ReportProtocolFailure(ctlConn.RemoteAddr().String())
-		}
 
 		return nil, err
 

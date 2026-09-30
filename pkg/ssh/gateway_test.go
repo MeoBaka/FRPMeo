@@ -17,7 +17,6 @@ package ssh
 import (
 	"net"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,61 +24,10 @@ import (
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
 
-// The gateway opens a port of its own, which no other part of frps guards. A
-// peer the firewall has turned away at the control port must not find a second
-// door standing open here.
-func TestGatewayAsksBeforeTheHandshake(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		allow      bool
-		wantBanner bool
-	}{
-		{name: "rejected", allow: false, wantBanner: false},
-		{name: "allowed", allow: true, wantBanner: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var asked atomic.Int32
-			g, err := NewGateway(v1.SSHTunnelGateway{BindPort: 0}, "127.0.0.1",
-				netpkg.NewInternalListener(),
-				func(_ string) (bool, string) {
-					asked.Add(1)
-					return tc.allow, "rate test"
-				})
-			if err != nil {
-				t.Fatalf("new gateway: %v", err)
-			}
-			go g.Run()
-			t.Cleanup(func() { _ = g.Close() })
-
-			conn, err := net.Dial("tcp", g.ln.Addr().String())
-			if err != nil {
-				t.Fatalf("dial: %v", err)
-			}
-			defer conn.Close()
-
-			// The ssh server announces itself before anything else, so the
-			// banner is what says the handshake began. Its absence is what
-			// says the connection was dropped before it could.
-			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-			buf := make([]byte, 64)
-			n, _ := conn.Read(buf)
-			gotBanner := strings.HasPrefix(string(buf[:n]), "SSH-")
-
-			if asked.Load() != 1 {
-				t.Fatalf("firewall asked %d times, want once", asked.Load())
-			}
-			if gotBanner != tc.wantBanner {
-				t.Fatalf("ssh banner present = %v, want %v (read %q)", gotBanner, tc.wantBanner, buf[:n])
-			}
-		})
-	}
-}
-
-// With no firewall configured the gateway is handed a nil check, and has to
-// carry on rather than turn everyone away.
-func TestGatewayWithoutFirewallLetsPeersIn(t *testing.T) {
-	g, err := NewGateway(v1.SSHTunnelGateway{BindPort: 0}, "127.0.0.1",
-		netpkg.NewInternalListener(), nil)
+// A peer that reaches the gateway's port is met by the ssh server itself: the
+// banner is the first thing it reads.
+func TestGatewayStartsTheSSHHandshake(t *testing.T) {
+	g, err := NewGateway(v1.SSHTunnelGateway{BindPort: 0}, "127.0.0.1", netpkg.NewInternalListener())
 	if err != nil {
 		t.Fatalf("new gateway: %v", err)
 	}

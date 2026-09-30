@@ -63,7 +63,7 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 		Password:        pxy.cfg.HTTPPassword,
 		CreateConnFn:    pxy.GetRealConn,
 		// http proxies are served by the vhost reverse proxy and never reach
-		// handleUserTCPConnection, so the firewall is applied per request here.
+		// handleUserTCPConnection, so admission is checked per request here.
 		AllowFn: pxy.newHTTPAdmitFilter(pxy.serverCfg.VhostHTTPPort),
 	}
 

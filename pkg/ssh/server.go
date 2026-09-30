@@ -87,10 +87,6 @@ type forwardedTCPPayload struct {
 type TunnelServer struct {
 	underlyingConn net.Conn
 
-	// handshakeByteLimit caps what a peer may send before the ssh handshake
-	// completes. Zero leaves it uncapped. See netpkg.LimitHandshake.
-	handshakeByteLimit int
-
 	sshConn *ssh.ServerConn
 
 	sc *ssh.ServerConfig
@@ -121,17 +117,7 @@ func NewTunnelServer(conn net.Conn, sc *ssh.ServerConfig, peerServerListener *ne
 }
 
 func (s *TunnelServer) Run() error {
-	// The ssh handshake is this listener's identification step, so it gets the
-	// same ceiling the control port applies to the tls one: a peer that pushes
-	// megabytes before saying who it is breaks no rate at all - one connection
-	// is one connection - but does hold the memory a pending handshake needs.
-	conn, doneHandshake := netpkg.LimitHandshake(s.underlyingConn, s.handshakeByteLimit)
-
-	sshConn, channels, requests, err := ssh.NewServerConn(conn, s.sc)
-
-	// Lifted here rather than deferred: the session below runs to the end of
-	// this function, and the bytes it carries are not the handshake's.
-	doneHandshake()
+	sshConn, channels, requests, err := ssh.NewServerConn(s.underlyingConn, s.sc)
 
 	if err != nil {
 		return err

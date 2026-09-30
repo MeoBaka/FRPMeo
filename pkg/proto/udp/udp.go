@@ -79,50 +79,12 @@ type SessionTracker struct {
 }
 
 // ForwardUserConn relays packets between a public UDP socket and the work
-
-// connection channels. allow, when non-nil, is consulted for every packet; a
-
-// false verdict drops it silently (UDP has no way to signal a rejection).
-
-// Callers are expected to cache their verdicts - this is the per-packet hot
-
-// path.
-
-//
-
-// It is handed the packet size as well as the source, because a byte rate is
-
-// what a UDP flood is actually made of: a thousand small packets and a thousand
-
-// large ones cost the link very differently, and only one of the two numbers
-
-// can tell them apart.
-
+// connection channels. allow, when non-nil, is consulted for every packet with
+// the datagram itself - a secure proxy's unlock arrives as one - and a false
+// verdict drops it silently (UDP has no way to signal a rejection). Callers are
+// expected to cache what they can: this is the per-packet hot path. The slice
+// is only valid during the call.
 func ForwardUserConn(
-	udpConn *net.UDPConn,
-
-	readCh <-chan *msg.UDPPacket,
-
-	sendCh chan<- *msg.UDPPacket,
-
-	bufSize int,
-
-	tracker *SessionTracker,
-
-	allow func(remoteAddr string, packetSize int) bool,
-) {
-	var byPacket func(string, []byte) bool
-	if allow != nil {
-		byPacket = func(remoteAddr string, packet []byte) bool { return allow(remoteAddr, len(packet)) }
-	}
-	ForwardUserConnPackets(udpConn, readCh, sendCh, bufSize, tracker, byPacket)
-}
-
-// ForwardUserConnPackets is ForwardUserConn with a filter that sees each
-// datagram, not only its size - for a check that has to read what a packet
-// says, such as a secure proxy's unlock line. The slice is only valid during
-// the call.
-func ForwardUserConnPackets(
 	udpConn *net.UDPConn,
 	readCh <-chan *msg.UDPPacket,
 	sendCh chan<- *msg.UDPPacket,

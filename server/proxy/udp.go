@@ -416,7 +416,7 @@ func (pxy *UDPProxy) Run() (remoteAddr string, err error) {
 	}
 
 	go func() {
-		udp.ForwardUserConnPackets(udpConn, pxy.readCh, pxy.sendCh, int(pxy.serverCfg.UDPPacketSize), tracker, pxy.newUDPPacketFilter(pxy.realBindPort))
+		udp.ForwardUserConn(udpConn, pxy.readCh, pxy.sendCh, int(pxy.serverCfg.UDPPacketSize), tracker, pxy.newUDPPacketFilter(pxy.realBindPort))
 
 		pxy.Close()
 	}()

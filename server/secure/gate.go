@@ -271,7 +271,7 @@ func (g *Gate) pruneUnlockedLocked(now time.Time) {
 
 // sourceLocked returns ip's entry, creating it, or nil when the table is full of
 // sources that still matter - a source that goes untracked is simply not rate
-// limited here, and the firewall in front still is.
+// limited, which beats a table that grows without bound.
 func (g *Gate) sourceLocked(ip netip.Addr, now time.Time) *source {
 	s := g.sources[ip]
 	if s == nil {

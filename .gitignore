@@ -25,7 +25,7 @@ dist/
 .autogen_ssh_key
 client.crt
 client.key
-# frps writes its firewall state wherever it is run from
+# firewall state that older frps builds wrote wherever they were run from
 frps_firewall.json
 
 node_modules/
