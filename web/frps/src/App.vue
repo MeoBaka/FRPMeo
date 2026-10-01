@@ -80,6 +80,14 @@
           >
             Proxies
           </router-link>
+          <router-link
+            to="/firewall"
+            class="sidebar-link"
+            :class="{ active: route.path.startsWith('/firewall') }"
+            @click="closeSidebar"
+          >
+            Firewall
+          </router-link>
         </nav>
       </aside>
 

@@ -20,6 +20,7 @@
 | New types | `xudp`, `xtcp+xudp`, `tcp+udp`, `stcp+sudp`, `mc` (Minecraft Java host routing, issue [#5390](https://github.com/fatedier/frp/issues/5390)), `pe` (Minecraft Bedrock host routing) |
 | Security | Default `transport.wireProtocol` switched **v1 → v2** (v1 kept as an option) |
 | Security | Per-proxy **secure access**: visitors present a key (link, HTTP request or first line) before frps forwards anything; allowed/trusted IP lists; anti-spam bans ([section 7](#7-secure-access--lock-a-proxy-behind-a-key)) |
+| Security | Native **firewall** on frps: allow/deny rules by IP, CIDR or domain and port, plus an optional blacklist provider (FRPControl or any HTTP API), managed from the frps dashboard ([section 8](#8-firewall--rules-and-a-blacklist-provider)) |
 | Bug fix | Reconnect getting stuck after `i/o deadline reached` on v2 (issue [#5355](https://github.com/fatedier/frp/issues/5355)) |
 | Dashboard | frpc admin API + Vue UI with full support for the new types |
 | Examples | `examples/frpc_example.toml`, `examples/frps_example.toml` (fully commented) |
@@ -316,6 +317,39 @@ frps dashboard shows the settings but never the key.
   is the one frps sees directly (a CDN in front of frps hides visitors' real IPs).
 - Not available with `loadBalancer.group`, nor on `stcp`/`sudp`/`xtcp` and their merged types, which
   already require `secretKey`.
+
+---
+
+## 8. Firewall — rules and a blacklist provider
+
+frps can decide who may connect before anything else happens. It is managed from the **Firewall** page
+of the frps dashboard (so `webServer.port` must be set), saved to `frps_firewall.json` in the directory
+frps runs from, and every change applies immediately.
+
+A connection is decided in this order:
+
+1. **Rules** — ordered allow/deny by IP, CIDR or domain name and by the frps port the connection arrived
+   on; the first match wins. A domain is resolved in the background and looked up again every minute,
+   so a rule naming a dynamic-DNS name keeps following its address.
+2. **Blacklist provider** (optional) — for an address no rule names, frps asks an FRPControl service
+   (URL + API key) or any HTTP API (URL, method, headers, JSON path) whether it is listed, and caches
+   the answer (`cacheTTLSec`, default 300).
+3. **Default policy** — allow or deny.
+
+User connections to every proxy are checked. The control port (with the kcp, quic and ssh gateway
+ports) and the dashboard are checked only when their switches on the page are on.
+
+When the provider cannot be reached:
+
+- The control port and the dashboard stay open — they never refuse anyone because the provider is down.
+  Builds before this one did, and when the provider was published through one of frps' own clients,
+  that client could never log back in to bring it back.
+- Proxies keep each address's last answer (for up to a day) and treat an address the provider has never
+  answered for as **Fail-open** says — off by default, which refuses it.
+- The page shows whether the provider is answering, and frps logs when it goes away and comes back.
+
+The firewall decides who may connect, not how often: there is no rate limiting. Floods have to be
+stopped in front of frps, by the host firewall or the hosting provider.
 
 ---
 

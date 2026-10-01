@@ -34,10 +34,16 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(url, { ...defaultOptions, ...options })
 
   if (!response.ok) {
+    // The firewall API says what it rejected in an {"error": ...} body; a bare
+    // status code would leave the user guessing which field was wrong.
+    const body = (await response.json().catch(() => null)) as {
+      error?: unknown
+    } | null
+    const detail = typeof body?.error === 'string' ? body.error : ''
     throw new HTTPError(
       response.status,
       response.statusText,
-      `HTTP ${response.status}`,
+      detail || `HTTP ${response.status}`,
     )
   }
 

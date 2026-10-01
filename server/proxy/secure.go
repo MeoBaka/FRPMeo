@@ -29,9 +29,9 @@ var errSecureNoHTTPPort = errors.New("secure: https proxies take unlock links on
 // pe and the udp half of tcp+udp), which have their own read loop and never
 // reach handleUserTCPConnection. port is the frps-side port they listen on.
 //
-// The NewUserConn plugin hook goes first, its verdicts cached because this runs
-// per packet; then secure access, which has to see the datagram itself since an
-// unlock can arrive as one.
+// The firewall and the NewUserConn plugin hook go first, their verdicts cached
+// because this runs per packet; then secure access, which has to see the
+// datagram itself since an unlock can arrive as one.
 func (pxy *BaseProxy) newUDPPacketFilter(port int) func(string, []byte) bool {
 	admit := pxy.newAdmitFilter("udp", port, admitVerdictTTL)
 	gate := pxy.gate

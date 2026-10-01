@@ -68,9 +68,15 @@ type Server struct {
 	auth *netpkg.HTTPAuthMiddleware
 
 	// guard is the allow list and the failed-login ban, nil when the config
-	// asked for neither.
+	// asked for neither. It runs ahead of connFilter: being on the list is a
+	// question about who the peer is, and there is no point asking anything
+	// else of somebody who is not.
 
 	guard *guard.Guard
+
+	// connFilter, when set, decides which peers get as far as the handshake.
+	// See SetConnFilter.
+	connFilter func(remoteAddr string) bool
 }
 
 func NewServer(cfg v1.WebServerConfig) (*Server, error) {
@@ -203,6 +209,19 @@ func (s *Server) Address() string {
 	return s.addr
 }
 
+// SetConnFilter installs a check run on every accepted connection, after the
+// allow list. It is asked before the TLS handshake and before a single byte is
+// read, so a peer it turns away costs nothing beyond the accept itself.
+//
+// It reports only whether to admit the peer: what to say about a rejection, and
+// how loudly, belongs to whoever knows why the answer was no. It runs in the
+// accept loop, so it must answer without waiting on anything slow.
+//
+// Must be called before Run.
+func (s *Server) SetConnFilter(allow func(remoteAddr string) bool) {
+	s.connFilter = allow
+}
+
 func (s *Server) Run() error {
 	ln := s.ln
 
@@ -210,8 +229,8 @@ func (s *Server) Run() error {
 
 	// have been handed to a handshake first.
 
-	if s.guard != nil {
-		ln = &filteredListener{Listener: ln, allow: s.guard.Allow}
+	if allow := s.admit(); allow != nil {
+		ln = &filteredListener{Listener: ln, allow: allow}
 	}
 
 	if s.tlsCfg != nil {
@@ -219,6 +238,23 @@ func (s *Server) Run() error {
 	}
 
 	return s.hs.Serve(ln)
+}
+
+// admit combines the allow list and the connection filter into the one check
+// the listener runs, or returns nil when neither is configured.
+func (s *Server) admit() func(remoteAddr string) bool {
+	g, filter := s.guard, s.connFilter
+	switch {
+	case g == nil && filter == nil:
+		return nil
+	case filter == nil:
+		return g.Allow
+	case g == nil:
+		return filter
+	}
+	return func(remoteAddr string) bool {
+		return g.Allow(remoteAddr) && filter(remoteAddr)
+	}
 }
 
 // filteredListener drops connections the filter refuses, so the server above it

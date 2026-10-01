@@ -84,8 +84,10 @@ func NewWithEnvs(path string, params []string, envs []string) *Process {
 }
 
 // SetDir runs the process from dir, so whatever it writes relative to its
-// working directory - frps's generated ssh gateway key, for one - lands in the
-// spec's own directory rather than one shared with specs running beside it.
+// working directory - frps's firewall state, its generated ssh gateway key -
+// lands in the spec's own directory rather than one shared with specs running
+// beside it. frps instances sharing one firewall state file fight over it, and
+// on Windows the loser cannot open the file at all and refuses to start.
 
 func (p *Process) SetDir(dir string) {
 	p.cmd.Dir = dir

@@ -31,6 +31,7 @@ import (
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
 	"github.com/fatedier/frp/pkg/util/tcpmux"
 	"github.com/fatedier/frp/pkg/util/vhost"
+	"github.com/fatedier/frp/server/firewall"
 	"github.com/fatedier/frp/server/group"
 	"github.com/fatedier/frp/server/ports"
 	"github.com/fatedier/frp/server/secure"
@@ -93,6 +94,10 @@ type ResourceController struct {
 	// All server manager plugin
 
 	PluginManager *plugin.Manager
+
+	// Native firewall: rules and the reputation provider for incoming
+	// connections, managed from the dashboard's Firewall page.
+	Firewall *firewall.Firewall
 
 	// Unlock requests for secure https proxies, which arrive on the http port
 	// for domains no http proxy serves.

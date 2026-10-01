@@ -4,6 +4,7 @@ import Clients from '../views/Clients.vue'
 import ClientDetail from '../views/ClientDetail.vue'
 import Proxies from '../views/Proxies.vue'
 import ProxyDetail from '../views/ProxyDetail.vue'
+import Firewall from '../views/Firewall.vue'
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -35,6 +36,11 @@ const router = createRouter({
       path: '/proxy/:name',
       name: 'ProxyDetail',
       component: ProxyDetail,
+    },
+    {
+      path: '/firewall',
+      name: 'Firewall',
+      component: Firewall,
     },
   ],
 })

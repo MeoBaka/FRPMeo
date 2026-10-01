@@ -20,9 +20,10 @@ import (
 	"sync"
 )
 
-// addrPort extracts the port from a net.Addr, or 0 if it has none. The plugin
-// hook's self-call check matches on the frps-side port a connection landed on,
-// which for an accepted connection is its local address.
+// addrPort extracts the port from a net.Addr, or 0 if it has none. Firewall
+// rules match on the frps-side port a connection landed on, as does the plugin
+// hook's self-call check, and for an accepted connection that is its local
+// address.
 func addrPort(addr net.Addr) int {
 	if addr == nil {
 		return 0

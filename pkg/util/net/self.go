@@ -22,8 +22,9 @@ import (
 )
 
 // This file exists for one shape of misconfiguration, which frps can be talked
-// into by an ordinary-looking setup: an endpoint frps calls out to - a server
-// plugin - that is only reachable through a proxy frps itself serves.
+// into by an ordinary-looking setup: an endpoint frps calls out to - a firewall
+// reputation provider, a server plugin - that is only reachable through a proxy
+// frps itself serves.
 //
 // The call then dials one of frps's own public ports, so frps sees a new user
 // connection, so it makes the call again. Nothing about the endpoint looks

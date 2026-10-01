@@ -64,6 +64,7 @@ import (
 	"github.com/fatedier/frp/pkg/util/vhost"
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server/controller"
+	"github.com/fatedier/frp/server/firewall"
 	"github.com/fatedier/frp/server/group"
 	"github.com/fatedier/frp/server/ports"
 	"github.com/fatedier/frp/server/proxy"
@@ -245,6 +246,30 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		webServer.RouteRegister(svr.registerRouteHandlers)
 	}
 
+	// Native firewall: rules and the reputation provider, managed from the
+	// dashboard and kept in a JSON file next to frps.
+
+	var fwErr error
+
+	if svr.rc.Firewall, fwErr = firewall.New("frps_firewall.json"); fwErr != nil {
+		return nil, fmt.Errorf("init firewall: %v", fwErr)
+	}
+
+	// The dashboard opens a port of its own, which nothing else guards. Its
+	// decisions go to the firewall's reporter rather than a log line each: an
+	// exposed port is probed all day, and a line per probe is a flood of its
+	// own.
+
+	if webServer != nil {
+		fw := svr.rc.Firewall
+		port := cfg.WebServer.Port
+		webServer.SetConnFilter(func(remoteAddr string) bool {
+			ok, reason := fw.AllowWeb(remoteAddr, port)
+			fw.NoteDecision(firewall.SurfaceWeb, ok, reason, remoteAddr)
+			return ok
+		})
+	}
+
 	// Create tcpmux httpconnect multiplexer.
 
 	if cfg.TCPMuxHTTPConnectPort > 0 {
@@ -328,6 +353,15 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		return nil, fmt.Errorf("create server listener error, %v", err)
 	}
 
+	// The firewall goes in front of the multiplexer rather than behind it. The
+	// multiplexer reads the opening bytes of every connection before handing it
+	// on, so a check placed after it lets a refused peer cost a goroutine and a
+	// buffer first, and can no longer refuse with a reset - see
+	// firewall.GuardControl. When the vhost muxers share this port their
+	// visitors pass here too, under the controlPort switch.
+
+	ln = svr.rc.Firewall.GuardControl(ln)
+
 	svr.muxer = mux.NewMux(ln)
 
 	svr.muxer.SetKeepAlive(time.Duration(cfg.Transport.TCPKeepAlive) * time.Second)
@@ -352,6 +386,10 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		if err != nil {
 			return nil, fmt.Errorf("listen on kcp udp address %s error: %v", address, err)
 		}
+
+		// Guarded like the tcp port: the one other listener clients dial
+		// directly, and not behind the multiplexer.
+		svr.kcpListener = svr.rc.Firewall.GuardControl(svr.kcpListener)
 
 		log.Infof("frps kcp listen on udp %s", address)
 
@@ -382,7 +420,18 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 	if cfg.SSHTunnelGateway.BindPort > 0 {
 
-		sshGateway, err := ssh.NewGateway(cfg.SSHTunnelGateway, cfg.BindAddr, svr.sshTunnelListener)
+		// The gateway opens a port of its own, so it takes the firewall in its
+		// own hands: connections there never pass through HandleListener.
+		fw := svr.rc.Firewall
+		allowSSH := func(remoteAddr string, port int) (bool, string) {
+			ok, reason := fw.AllowControl(remoteAddr, port)
+			fw.NoteDecision(firewall.SurfaceSSH, ok, reason, remoteAddr)
+			// No reason back, so the gateway does not log the refusal as well:
+			// the firewall's reporter already covers it.
+			return ok, ""
+		}
+
+		sshGateway, err := ssh.NewGateway(cfg.SSHTunnelGateway, cfg.BindAddr, svr.sshTunnelListener, allowSSH)
 		if err != nil {
 			return nil, fmt.Errorf("create ssh gateway error: %v", err)
 		}
@@ -1107,6 +1156,18 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 
 			return
 
+		}
+
+		// The firewall, before any stream is accepted. No reset to arm here -
+		// quic closes without leaving TIME_WAIT behind.
+		if fw := svr.rc.Firewall; fw != nil {
+			remoteAddr := c.RemoteAddr().String()
+			ok, reason := fw.AllowControl(remoteAddr, firewall.ListenPort(c.LocalAddr()))
+			fw.NoteDecision(firewall.SurfaceControl, ok, reason, remoteAddr)
+			if !ok {
+				_ = c.CloseWithError(0, "")
+				continue
+			}
 		}
 
 		// Start a new goroutine to handle connection.

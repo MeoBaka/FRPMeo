@@ -51,6 +51,7 @@ import (
 	"github.com/fatedier/frp/pkg/util/vhost"
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server/controller"
+	"github.com/fatedier/frp/server/firewall"
 	"github.com/fatedier/frp/server/metrics"
 	"github.com/fatedier/frp/server/secure"
 )
@@ -437,25 +438,34 @@ const (
 
 //
 
-// port is the shared vhost http port. Every http proxy answers on it, so a
-// plugin naming that port covers all of them rather than one.
+// port is the shared vhost http port. Every http proxy answers on it, so a rule
+// or plugin naming that port covers all of them rather than one.
 
 func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
-	// A plugin turns each request into an http round trip, which a busy site
-	// would not survive, so its verdicts are cached.
-	base := pxy.newAdmitFilter("conn", port, admitVerdictTTL)
+	// With no plugin the check is a local lookup - cheap enough to repeat per
+	// request, which keeps rule changes immediate. A plugin turns each request
+	// into an http round trip, which a busy site would not survive, so verdicts
+	// get cached instead.
+	ttl := time.Duration(0)
+
+	if pm := pxy.GetResourceController().PluginManager; pm != nil && pm.HasNewUserConnPlugins() {
+		ttl = admitVerdictTTL
+	}
+
+	base := pxy.newAdmitFilter("conn", port, ttl)
 
 	gate := pxy.gate
 
 	return func(req *http.Request) vhost.AllowDecision {
-		// The plugin hook first: it is about who is asking, and a peer with no
-		// business here should be told so before being offered a login page.
+		// The firewall and the plugin hook first: they are about who is asking,
+		// and a peer with no business here should be told so before being
+		// offered a login page.
 		if base != nil && !base(req.RemoteAddr) {
 			return vhost.AllowDecision{StatusCode: http.StatusForbidden}
 		}
 
 		// Secure access last: it may answer with a login page or a redirect,
-		// which only makes sense for a request the hook let through.
+		// which only makes sense for a request the checks above let through.
 		if gate != nil {
 			return gate.CheckHTTP(req)
 		}
@@ -465,22 +475,14 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 }
 
 // newAdmitFilter builds the admission predicate for the paths that bypass
-
-// handleUserTCPConnection: the NewUserConn plugin hook. Returns nil when no
-
-// such plugin is configured, so those paths pay nothing.
-
+// handleUserTCPConnection: the firewall first, then the NewUserConn plugin
+// hook. Returns nil when neither is configured, so those paths pay nothing.
 //
-
 // A non-zero ttl caches the verdict per source address. That is sound rather
-
-// than a shortcut: the hook only ever sees the source, the proxy and its
-
+// than a shortcut: both stages only ever see the source, the proxy and its
 // owner, so asking twice about the same source cannot produce a different
-
-// answer. The cost is that a plugin changing its mind takes up to ttl to reach
-
-// traffic already flowing.
+// answer. The cost is that a rule change takes up to ttl to reach traffic
+// already flowing.
 
 // what names the kind of traffic in log lines, "conn" or "udp". The proxy name
 
@@ -489,11 +491,13 @@ func (pxy *BaseProxy) newHTTPAdmitFilter(port int) vhost.AllowFunc {
 func (pxy *BaseProxy) newAdmitFilter(what string, port int, ttl time.Duration) func(string) bool {
 	rc := pxy.GetResourceController()
 
+	fw := rc.Firewall
+
 	pm := rc.PluginManager
 
 	hookPlugins := pm != nil && pm.HasNewUserConnPlugins()
 
-	if !hookPlugins {
+	if fw == nil && !hookPlugins {
 		return nil
 	}
 
@@ -504,6 +508,14 @@ func (pxy *BaseProxy) newAdmitFilter(what string, port int, ttl time.Duration) f
 	proxyType := pxy.configurer.GetBaseConfig().Type
 
 	check := func(remoteAddr string) bool {
+		if fw != nil {
+			ok, reason := fw.Allow(remoteAddr, port)
+			fw.NoteDecision(firewall.SurfaceProxy, ok, reason, remoteAddr)
+			if !ok {
+				return false
+			}
+		}
+
 		// Skipped for frps reaching a plugin published through one of our own
 
 		// proxies, which would otherwise have the hook call itself.
@@ -588,9 +600,9 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 
 	remoteAddr := userConn.RemoteAddr().String()
 
-	// The frps-side port the user dialed: what tells us a connection is frps
+	// The frps-side port the user dialed: what a firewall rule matches on, and
 
-	// reaching its own machinery.
+	// what tells us a connection is frps reaching its own machinery.
 
 	dstPort := addrPort(userConn.LocalAddr())
 
@@ -600,6 +612,19 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 	// Every refusal here closes with RST rather than a graceful FIN, so nothing
 	// is left in TIME_WAIT - the deferred Close above does the closing, this
 	// only changes how.
+
+	// The firewall first: it is about who is connecting, and the cheapest
+	// question. Decisions are counted by its own reporter rather than logged
+	// one per connection, so a run of refusals does not become a run of writes
+	// to the log.
+	if fw := rc.Firewall; fw != nil {
+		ok, reason := fw.Allow(remoteAddr, dstPort)
+		fw.NoteDecision(firewall.SurfaceProxy, ok, reason, remoteAddr)
+		if !ok {
+			netpkg.ArmReset(userConn)
+			return
+		}
+	}
 
 	// Secure access, still before the connection is logged: a proxy that wants
 	// a key refuses everyone who has not shown it, and answers unlock requests

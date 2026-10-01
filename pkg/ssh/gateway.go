@@ -41,6 +41,16 @@ import (
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
 
+// AllowFunc decides whether a peer may open an ssh connection at all. It is
+// handed in rather than reached for: the firewall lives in the server, and the
+// gateway has no business knowing about it.
+//
+// remoteAddr is the peer, port the gateway port it arrived on, so a rule can
+// name that port like any other. An empty reason on a rejection means "do not
+// log this one": the firewall reports its own refusals, in summaries rather
+// than a line each.
+type AllowFunc func(remoteAddr string, port int) (ok bool, reason string)
+
 type Gateway struct {
 	bindPort int
 
@@ -49,12 +59,18 @@ type Gateway struct {
 	peerServerListener *netpkg.InternalListener
 
 	sshConfig *ssh.ServerConfig
+
+	// allow is consulted before anything is read from a peer. nil means no
+	// firewall is configured, and every peer is let through.
+	allow AllowFunc
 }
 
 func NewGateway(
 	cfg v1.SSHTunnelGateway, bindAddr string,
 
 	peerServerListener *netpkg.InternalListener,
+
+	allow AllowFunc,
 ) (*Gateway, error) {
 	sshConfig := &ssh.ServerConfig{}
 
@@ -132,6 +148,8 @@ func NewGateway(
 
 		ln: ln,
 
+		allow: allow,
+
 		peerServerListener: peerServerListener,
 
 		sshConfig: sshConfig,
@@ -146,9 +164,34 @@ func (g *Gateway) Run() {
 			return
 		}
 
+		// Before the ssh handshake, not after: this port reaches the same
+		// tunneling as the control port, so a peer the firewall turns away
+		// there must not find a second door here.
+		if g.allow != nil {
+			if ok, reason := g.allow(conn.RemoteAddr().String(), g.port()); !ok {
+				if reason != "" {
+					log.Warnf("[FW] reject ssh %s reason: %s", conn.RemoteAddr(), reason)
+				}
+
+				// RST, so a refusal leaves no TIME_WAIT socket behind.
+				netpkg.ArmReset(conn)
+				conn.Close()
+				continue
+			}
+		}
+
 		go g.handleConn(conn)
 
 	}
+}
+
+// port is the port the gateway listens on: the configured one, or the one the
+// system picked when the config asked for any.
+func (g *Gateway) port() int {
+	if a, ok := g.ln.Addr().(*net.TCPAddr); ok {
+		return a.Port
+	}
+	return g.bindPort
 }
 
 func (g *Gateway) Close() error {
