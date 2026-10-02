@@ -743,7 +743,7 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 					Version:  version.Full(),
 					RunID:    ctl.runID,
 					Error:    "",
-					Features: []string{msg.FeatureSecureProxy},
+					Features: []string{msg.FeatureSecureProxy, msg.FeatureSecureMethods},
 				})
 			})
 		}); err != nil {

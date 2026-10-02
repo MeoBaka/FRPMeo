@@ -13,8 +13,9 @@
 // limitations under the License.
 
 // Package secure locks a proxy behind a key. A visitor proves the key - by
-// opening a link, by an HTTP request, or on the first line of a connection -
-// and frps forwards nothing to the backend for anyone who has not.
+// opening a link, at a sign-in prompt, in an HTTP request, or on the first line
+// of a connection - and frps forwards nothing to the backend for anyone who has
+// not.
 //
 // Most clients cannot send anything of their own ahead of the protocol they
 // speak (a game, RDP, SSH), so proving the key usually unlocks the visitor's IP
@@ -64,7 +65,12 @@ type Gate struct {
 
 	// The ways the key may be presented, narrowed to what the proxy type can
 	// carry.
-	link, http, line bool
+	link, basic, header, form, json, bearer, line bool
+
+	// pageLink puts a link back to the page on the unlocked page. Only for the
+	// raw ports - tcp, tcp+udp - where the backend may well be a website the
+	// visitor came for; elsewhere the page they asked for is not on this port.
+	pageLink bool
 
 	unlockTTL   time.Duration
 	allow       []netip.Prefix
@@ -112,8 +118,13 @@ func NewGate(name, proxyType string, cfg *v1.SecureConfig) (*Gate, error) {
 		title:       cfg.Title,
 		keySum:      sha256.Sum256([]byte(cfg.Key)),
 		link:        cfg.HasMethod(v1.SecureMethodLink),
-		http:        cfg.HasMethod(v1.SecureMethodHTTP),
+		basic:       cfg.HasMethod(v1.SecureMethodBasic),
+		header:      cfg.HasMethod(v1.SecureMethodHeader),
+		form:        cfg.HasMethod(v1.SecureMethodForm),
+		json:        cfg.HasMethod(v1.SecureMethodJSON),
+		bearer:      cfg.HasMethod(v1.SecureMethodBearer),
 		line:        cfg.HasMethod(v1.SecureMethodLine) && v1.SecureLineApplies(proxyType),
+		pageLink:    proxyType == string(v1.ProxyTypeTCP) || proxyType == string(v1.ProxyTypeTCPUDP),
 		unlockTTL:   seconds(orDefault(cfg.UnlockSeconds, v1.DefaultSecureUnlockSeconds)),
 		allow:       allow,
 		trusted:     trusted,
@@ -128,10 +139,10 @@ func NewGate(name, proxyType string, cfg *v1.SecureConfig) (*Gate, error) {
 	}, nil
 }
 
-// TakesRequests reports whether the key can arrive in an HTTP request - a link
-// or a request carrying it.
+// TakesRequests reports whether the key can arrive in an HTTP request - a link,
+// a sign-in, or a request carrying it.
 func (g *Gate) TakesRequests() bool {
-	return g.link || g.http
+	return g.link || g.basic || g.header || g.form || g.json || g.bearer
 }
 
 // HasOtherWayIn reports whether a visitor could get in without an HTTP

@@ -64,10 +64,24 @@ class BaseProxy {
   }
 }
 
+// How each secure method reads in the summary. "http" is header, form and json
+// together, the first version's single switch.
+const SECURE_METHOD_LABELS: Record<string, string> = {
+  link: 'link',
+  basic: 'sign-in prompt',
+  header: 'header',
+  form: 'POST form',
+  json: 'POST JSON',
+  bearer: 'bearer token',
+  http: 'header / POST',
+  line: 'first line',
+}
+
 // describeSecure sums up a proxy's secure access settings in one line. frps
 // never sends the key itself, only that there is one.
 function describeSecure(s: any): string {
   if (!s?.enable) return ''
+  // An empty list is what frps defaults to: link, http and line.
   const methods: string[] =
     Array.isArray(s.methods) && s.methods.length > 0
       ? s.methods
@@ -75,7 +89,7 @@ function describeSecure(s: any): string {
   const hours = (s.unlockSeconds || 43200) / 3600
   const parts = [
     `title "${s.title}"`,
-    methods.join(', '),
+    methods.map((m) => SECURE_METHOD_LABELS[m] || m).join(', '),
     `unlock ${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`,
   ]
   if (s.allowIPs?.length) parts.push(`${s.allowIPs.length} allowed IP(s)`)

@@ -45,3 +45,23 @@ func TestTheFeatureIsReadFromTheLoginResponse(t *testing.T) {
 	pm.SetServerFeatures([]string{msg.FeatureSecureProxy})
 	require.True(t, pm.serverSecure.Load())
 }
+
+// An frps that knows secure access but not the methods added since refuses the
+// proxy with a validation error. frpc says what to do about it instead, and
+// sends nothing.
+func TestNewerSecureMethodsNeedTheNewerFeature(t *testing.T) {
+	pm := &Manager{}
+	pm.SetServerFeatures([]string{msg.FeatureSecureProxy})
+
+	err := pm.checkSecureMethods(&msg.ProxySecure{Title: "auth", Key: "secret123", Methods: []string{"link", "basic", "bearer"}})
+	require.ErrorIs(t, err, ErrSecureUnsupported, "fails the start like any unsupported secure proxy")
+	require.ErrorContains(t, err, "basic, bearer")
+	require.NotContains(t, err.Error(), "link", "only what that frps lacks is named")
+
+	// What the first version knew still goes to that frps.
+	require.NoError(t, pm.checkSecureMethods(&msg.ProxySecure{Methods: []string{"link", "http", "line"}}))
+	require.NoError(t, pm.checkSecureMethods(&msg.ProxySecure{}))
+
+	pm.SetServerFeatures([]string{msg.FeatureSecureProxy, msg.FeatureSecureMethods})
+	require.NoError(t, pm.checkSecureMethods(&msg.ProxySecure{Methods: []string{"basic", "bearer"}}))
+}

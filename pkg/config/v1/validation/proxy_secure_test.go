@@ -81,6 +81,24 @@ func TestValidateSecureConfig(t *testing.T) {
 			b.Secure.Methods = []string{"line"}
 		}), wantErr: "not supported for mc"},
 		{name: "every method on http means the ones that apply", base: secureBase("http", nil)},
+		{name: "each newer method by name", base: secureBase("tcp", func(b *v1.ProxyBaseConfig) {
+			b.Secure.Methods = []string{"basic", "header", "form", "json", "bearer"}
+		})},
+		{name: "basic alone on http", base: secureBase("http", func(b *v1.ProxyBaseConfig) {
+			b.Secure.Methods = []string{"basic"}
+		})},
+		{name: "basic cannot share the Authorization header with a title of that name", base: secureBase("tcp", func(b *v1.ProxyBaseConfig) {
+			b.Secure.Title = "Authorization"
+			b.Secure.Methods = []string{"basic", "header"}
+		}), wantErr: "secure.title"},
+		{name: "nor can bearer", base: secureBase("tcp", func(b *v1.ProxyBaseConfig) {
+			b.Secure.Title = "authorization"
+			b.Secure.Methods = []string{"bearer"}
+		}), wantErr: "secure.title"},
+		{name: "a title of that name is fine without them", base: secureBase("tcp", func(b *v1.ProxyBaseConfig) {
+			b.Secure.Title = "authorization"
+			b.Secure.Methods = []string{"header"}
+		})},
 		{name: "negative unlock", base: secureBase("tcp", func(b *v1.ProxyBaseConfig) {
 			b.Secure.UnlockSeconds = -1
 		}), wantErr: "unlockSeconds"},
@@ -102,4 +120,31 @@ func TestValidateSecureConfig(t *testing.T) {
 			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
+}
+
+// basic and bearer read the Authorization header, which an http proxy's own
+// basic authentication reads too; one of the two would always lose.
+func TestSecureBasicAndBearerRefuseHTTPAuth(t *testing.T) {
+	httpProxy := func(methods []string, edit func(*v1.HTTPProxyConfig)) *v1.HTTPProxyConfig {
+		c := &v1.HTTPProxyConfig{}
+		c.Type = "http"
+		c.Secure = v1.SecureConfig{Enable: true, Title: "dangnhap", Key: "secret123", Methods: methods}
+		if edit != nil {
+			edit(c)
+		}
+		return c
+	}
+	withUser := func(c *v1.HTTPProxyConfig) { c.HTTPUser, c.HTTPPassword = "u", "p" }
+	withRoute := func(c *v1.HTTPProxyConfig) { c.RouteByHTTPUser = "u" }
+
+	require.NoError(t, validateSecureHTTPAuth(httpProxy([]string{"basic"}, nil)))
+	require.NoError(t, validateSecureHTTPAuth(httpProxy(nil, withUser)), "the defaults leave Authorization alone")
+	require.NoError(t, validateSecureHTTPAuth(httpProxy([]string{"header", "form"}, withUser)))
+	require.ErrorContains(t, validateSecureHTTPAuth(httpProxy([]string{"basic"}, withUser)), "httpUser")
+	require.ErrorContains(t, validateSecureHTTPAuth(httpProxy([]string{"bearer"}, withUser)), "httpUser")
+	require.ErrorContains(t, validateSecureHTTPAuth(httpProxy([]string{"link", "basic"}, withRoute)), "routeByHTTPUser")
+
+	off := httpProxy([]string{"basic"}, withUser)
+	off.Secure.Enable = false
+	require.NoError(t, validateSecureHTTPAuth(off), "secure access off is nobody's business")
 }

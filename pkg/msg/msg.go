@@ -177,6 +177,12 @@ type LoginResp struct {
 // no lock on it, so frpc does not send a secure proxy to a server without it.
 const FeatureSecureProxy = "secure-proxy"
 
+// FeatureSecureMethods is advertised by an frps that understands the ways of
+// presenting a secure key added after the first version - basic, header, form,
+// json and bearer. An frps with only FeatureSecureProxy refuses those as
+// unknown, so frpc stops such a proxy itself and says why.
+const FeatureSecureMethods = "secure-methods"
+
 // ProxySecure is the wire form of a proxy's secure access settings: a visitor
 // has to present "<title>: <key>" before frps forwards anything.
 type ProxySecure struct {

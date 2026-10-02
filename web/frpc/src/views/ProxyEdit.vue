@@ -47,7 +47,7 @@ import {
   type ProxyFormData,
   createDefaultProxyForm,
   formToStoreProxy,
-  secureLineApplies,
+  secureAnyMethod,
   storeProxyToForm,
 } from '../types'
 import { getStoreProxy } from '../api/frpc'
@@ -122,8 +122,16 @@ const rules: FormRules = {
   secureTitle: [
     {
       validator: (_rule, value, callback) => {
-        if (form.value.secureEnable && !/^[A-Za-z0-9_-]{1,64}$/.test(value || '')) {
+        const f = form.value
+        if (f.secureEnable && !/^[A-Za-z0-9_-]{1,64}$/.test(value || '')) {
           callback(new Error('1-64 letters, digits, - or _'))
+        } else if (
+          f.secureEnable &&
+          (f.secureMethodBasic || f.secureMethodBearer) &&
+          (value || '').toLowerCase() === 'authorization'
+        ) {
+          // The sign-in prompt and bearer tokens read that header themselves.
+          callback(new Error('"authorization" is taken by the sign-in prompt and bearer tokens'))
         } else {
           callback()
         }
@@ -152,9 +160,16 @@ const rules: FormRules = {
     {
       validator: (_rule, _value, callback) => {
         const f = form.value
-        const line = f.secureMethodLine && secureLineApplies(f.type)
-        if (f.secureEnable && !f.secureMethodLink && !f.secureMethodHTTP && !line) {
+        if (f.secureEnable && !secureAnyMethod(f)) {
           callback(new Error('Enable at least one way to present the key'))
+        } else if (
+          f.secureEnable &&
+          f.type === 'http' &&
+          (f.secureMethodBasic || f.secureMethodBearer) &&
+          (f.httpUser || f.httpPassword || f.routeByHTTPUser)
+        ) {
+          // Both would read the one Authorization header a request carries.
+          callback(new Error('Sign-in prompt and bearer tokens cannot be used with HTTP User / Password'))
         } else {
           callback()
         }

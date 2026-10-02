@@ -73,13 +73,45 @@ func TestSecureCloneSharesNoLists(t *testing.T) {
 	require.Equal(t, fullSecureConfig(), orig.Secure)
 }
 
-func TestSecureMethodsDefaultToAll(t *testing.T) {
+// An empty list means what the first version offered, so a config written for
+// it keeps working the same: basic and bearer have to be asked for.
+func TestSecureMethodsDefaultToTheFirstSet(t *testing.T) {
 	c := SecureConfig{}
-	for _, m := range SecureMethods {
+	for _, m := range []string{SecureMethodLink, SecureMethodHTTP, SecureMethodHeader, SecureMethodForm, SecureMethodJSON, SecureMethodLine} {
 		require.True(t, c.HasMethod(m), m)
+	}
+	for _, m := range []string{SecureMethodBasic, SecureMethodBearer} {
+		require.False(t, c.HasMethod(m), "%s is opt-in", m)
 	}
 
 	c.Methods = []string{SecureMethodLink}
 	require.True(t, c.HasMethod(SecureMethodLink))
 	require.False(t, c.HasMethod(SecureMethodLine))
+	require.False(t, c.HasMethod(SecureMethodHeader))
+}
+
+// "http" is the first version's name for header, form and json together; the
+// three can now also be chosen one at a time.
+func TestSecureHTTPMeansHeaderFormAndJSON(t *testing.T) {
+	c := SecureConfig{Methods: []string{SecureMethodHTTP}}
+	for _, m := range []string{SecureMethodHeader, SecureMethodForm, SecureMethodJSON} {
+		require.True(t, c.HasMethod(m), m)
+	}
+	require.False(t, c.HasMethod(SecureMethodBasic))
+	require.False(t, c.HasMethod(SecureMethodLink))
+
+	c.Methods = []string{SecureMethodForm, SecureMethodBasic}
+	require.True(t, c.HasMethod(SecureMethodForm))
+	require.True(t, c.HasMethod(SecureMethodBasic))
+	require.False(t, c.HasMethod(SecureMethodHeader))
+	require.False(t, c.HasMethod(SecureMethodJSON))
+	require.False(t, c.HasMethod(SecureMethodHTTP), "one of the three is not all of them")
+}
+
+// What an frps from before the newer methods would not know.
+func TestNewerSecureMethods(t *testing.T) {
+	require.Empty(t, NewerSecureMethods(nil))
+	require.Empty(t, NewerSecureMethods([]string{SecureMethodLink, SecureMethodHTTP, SecureMethodLine}))
+	require.Equal(t, []string{SecureMethodBasic, SecureMethodForm},
+		NewerSecureMethods([]string{SecureMethodLink, SecureMethodBasic, SecureMethodForm, SecureMethodBasic}))
 }

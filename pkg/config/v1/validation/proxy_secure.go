@@ -78,11 +78,17 @@ func validateSecureConfig(base *v1.ProxyBaseConfig) error {
 		if !slices.Contains(v1.SecureMethods, m) {
 			return fmt.Errorf("secure.methods: unknown method %q, valid are %s", m, strings.Join(v1.SecureMethods, ", "))
 		}
-		// An empty list quietly means "every method that applies"; naming one
+		// An empty list quietly means "the defaults that apply"; naming one
 		// that cannot work is a mistake worth reporting back to frpc.
 		if m == v1.SecureMethodLine && !v1.SecureLineApplies(base.Type) {
 			return fmt.Errorf("secure.methods: %q is not supported for %s proxies, which have no first line to carry a key", m, base.Type)
 		}
+	}
+	// basic and bearer read the Authorization header, so a title of that name
+	// would have the header method read the same header as well.
+	if (c.HasMethod(v1.SecureMethodBasic) || c.HasMethod(v1.SecureMethodBearer)) &&
+		strings.EqualFold(c.Title, "authorization") {
+		return errors.New("secure.title: \"authorization\" is the header basic and bearer use, choose another name")
 	}
 	if c.UnlockSeconds < 0 {
 		return errors.New("secure.unlockSeconds: must not be negative")
@@ -91,6 +97,24 @@ func validateSecureConfig(base *v1.ProxyBaseConfig) error {
 		return err
 	}
 	return validateSecureIPList("secure.trustedIPs", c.TrustedIPs)
+}
+
+// validateSecureHTTPAuth refuses basic and bearer on an http proxy that has
+// frp's own basic authentication. Both read the one Authorization header a
+// request carries, so whichever looked second would see the other's
+// credentials and turn the visitor away.
+func validateSecureHTTPAuth(c *v1.HTTPProxyConfig) error {
+	s := &c.Secure
+	if !s.Enable || (c.HTTPUser == "" && c.HTTPPassword == "" && c.RouteByHTTPUser == "") {
+		return nil
+	}
+	for _, m := range []string{v1.SecureMethodBasic, v1.SecureMethodBearer} {
+		if s.HasMethod(m) {
+			return fmt.Errorf("secure.methods: %q cannot be used together with httpUser, httpPassword or routeByHTTPUser, "+
+				"which read the same Authorization header", m)
+		}
+	}
+	return nil
 }
 
 func validateSecureIPList(field string, entries []string) error {

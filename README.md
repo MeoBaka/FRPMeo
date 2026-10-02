@@ -19,7 +19,7 @@
 |---|---|
 | New types | `xudp`, `xtcp+xudp`, `tcp+udp`, `stcp+sudp`, `mc` (Minecraft Java host routing, issue [#5390](https://github.com/fatedier/frp/issues/5390)), `pe` (Minecraft Bedrock host routing) |
 | Security | Default `transport.wireProtocol` switched **v1 → v2** (v1 kept as an option) |
-| Security | Per-proxy **secure access**: visitors present a key (link, HTTP request or first line) before frps forwards anything; allowed/trusted IP lists; anti-spam bans ([section 7](#7-secure-access--lock-a-proxy-behind-a-key)) |
+| Security | Per-proxy **secure access**: visitors present a key (link, sign-in prompt, HTTP header/form/JSON, bearer token or first line) before frps forwards anything; allowed/trusted IP lists; anti-spam bans ([section 7](#7-secure-access--lock-a-proxy-behind-a-key)) |
 | Security | Native **firewall** on frps: allow/deny rules by IP, CIDR or domain and port, plus an optional blacklist provider (FRPControl or any HTTP API), managed from the frps dashboard ([section 8](#8-firewall--rules-and-a-blacklist-provider)) |
 | Bug fix | Reconnect getting stuck after `i/o deadline reached` on v2 (issue [#5355](https://github.com/fatedier/frp/issues/5355)) |
 | Dashboard | frpc admin API + Vue UI with full support for the new types |
@@ -275,14 +275,22 @@ with English comments on every entry — including all of the new types above.
 
 Any public proxy (`tcp`, `udp`, `http`, `https`, `tcpmux`, `tcp+udp`, `mc`, `pe`) can require visitors
 to present a key before frps forwards anything to the backend. The key is `<title>: <key>` — a name
-you choose (`auth`, `dangnhap`, …) and the secret itself — and it can be presented three ways, each of
-which can be switched off:
+you choose (`auth`, `dangnhap`, …) and the secret itself — and it can be presented in several ways,
+each switched on or off on its own:
 
 | Method | How the visitor presents it | Effect |
 |---|---|---|
 | `link` | opens `http://<frps>:<port>/?dangnhap=KEY` once | unlocks their IP for `unlockSeconds` (http proxies also set a cookie) |
-| `http` | any request with the header `dangnhap: KEY`, or a form/JSON field of that name | unlocks their IP (on http proxies it admits that request) |
+| `basic` | opens `http://<frps>:<port>/`; the browser asks for a username and password: `dangnhap` and `KEY` (scripts: `curl -u dangnhap:KEY`) | unlocks their IP (on http proxies it also admits the request) |
+| `header` | any request with the header `dangnhap: KEY` | unlocks their IP (on http proxies it admits that request) |
+| `form` | a POST with the form field `dangnhap=KEY` | unlocks their IP |
+| `json` | a POST with the JSON body `{"dangnhap": "KEY"}` | unlocks their IP |
+| `bearer` | any request with `Authorization: Bearer KEY`, the way API clients send an API key | admits that request (on tcp proxies it goes straight to the backend and unlocks the IP) |
 | `line` | sends `dangnhap: KEY` as the first line of the connection | admits that connection; the rest goes to the backend |
+
+`http` stands for `header`, `form` and `json` together. An empty `secure.methods` means `link`, `http`
+and `line`; `basic` and `bearer` are only on when listed. `basic` and `bearer` cannot be combined with an
+http proxy's own `httpUser`/`httpPassword`, which read the same `Authorization` header.
 
 Games, RDP and SSH cannot send a key themselves, so the usual flow is: open the link once, then
 connect as normal. frps serves the link on the proxy's own port — for `udp`/`pe` it listens on TCP
@@ -298,7 +306,7 @@ remotePort = 25565
 secure.enable = true
 secure.title = "dangnhap"
 secure.key = "change-me-please"
-# secure.methods = ["link", "http", "line"]  # empty = every method the type allows
+# secure.methods = ["link", "basic", "bearer"]  # empty = link, http and line
 # secure.unlockSeconds = 43200               # 12 hours
 # secure.allowIPs = ["203.0.113.0/24"]       # only these may connect, and they still need the key
 # secure.trustedIPs = ["198.51.100.7"]       # these connect without the key
@@ -307,12 +315,13 @@ secure.key = "change-me-please"
 # secure.antiSpam.banSeconds = 600
 ```
 
-The frpc dashboard has a **Secure Access** section with a key generator and ready-to-copy links; the
-frps dashboard shows the settings but never the key.
+The frpc dashboard has a **Secure Access** section with a switch for each method, a key generator and
+ready-to-copy examples; the frps dashboard shows the settings but never the key.
 
 - frpc refuses to start a secure proxy on an frps that does not support it — an older frps would
-  silently serve it unlocked — and frps rejects methods the proxy type cannot carry (`line` on
-  `http`, `https` and `mc`).
+  silently serve it unlocked — or that does not know the methods it uses (`basic`, `header`, `form`,
+  `json` and `bearer` need an frps from this version on). frps rejects methods the proxy type cannot
+  carry (`line` on `http`, `https` and `mc`).
 - The unit of trust is the IP address: everyone behind the same NAT shares an unlock, and the address
   is the one frps sees directly (a CDN in front of frps hides visitors' real IPs).
 - Not available with `loadBalancer.group`, nor on `stcp`/`sudp`/`xtcp` and their merged types, which

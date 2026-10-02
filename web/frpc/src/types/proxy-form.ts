@@ -65,12 +65,17 @@ export interface ProxyFormData {
   // MC/PE specific (fork Minecraft types): pe hostname -> local backend map
   forcedHosts: Array<{ key: string; value: string }>
 
-  // Secure access (SecureConfig) - every type in SECURE_PROXY_TYPES
+  // Secure access (SecureConfig) - every type in SECURE_PROXY_TYPES. One
+  // switch per way of presenting the key; secure.methods is built from them.
   secureEnable: boolean
   secureTitle: string
   secureKey: string
   secureMethodLink: boolean
-  secureMethodHTTP: boolean
+  secureMethodBasic: boolean
+  secureMethodHeader: boolean
+  secureMethodForm: boolean
+  secureMethodJSON: boolean
+  secureMethodBearer: boolean
   secureMethodLine: boolean
   secureUnlockSeconds: number
   secureAllowIPs: string[]
@@ -100,6 +105,20 @@ export const SECURE_PROXY_TYPES: ProxyType[] = [
 // in the handshake, which a key line lacks - it rejects the method on all three.
 export function secureLineApplies(type: ProxyType): boolean {
   return type !== 'http' && type !== 'https' && type !== 'mc'
+}
+
+// secureAnyMethod reports whether at least one way of presenting the key is on
+// for this type. With none, frps would read the empty list as the defaults.
+export function secureAnyMethod(f: ProxyFormData): boolean {
+  return (
+    f.secureMethodLink ||
+    f.secureMethodBasic ||
+    f.secureMethodHeader ||
+    f.secureMethodForm ||
+    f.secureMethodJSON ||
+    f.secureMethodBearer ||
+    (f.secureMethodLine && secureLineApplies(f.type))
+  )
 }
 
 export interface VisitorFormData {
@@ -188,8 +207,14 @@ export function createDefaultProxyForm(): ProxyFormData {
     secureEnable: false,
     secureTitle: '',
     secureKey: '',
+    // The defaults are what frps reads an empty list as. The sign-in prompt
+    // and bearer tokens are only on when chosen.
     secureMethodLink: true,
-    secureMethodHTTP: true,
+    secureMethodBasic: false,
+    secureMethodHeader: true,
+    secureMethodForm: true,
+    secureMethodJSON: true,
+    secureMethodBearer: false,
     secureMethodLine: true,
     secureUnlockSeconds: 0,
     secureAllowIPs: [],

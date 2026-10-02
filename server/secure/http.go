@@ -25,10 +25,12 @@ import (
 )
 
 // CheckHTTP decides one request to an http proxy. A request carries its own
-// proof - the cookie an earlier unlock set, the key in a header, or an address
-// that is unlocked or trusted. A link or the login form unlocks and redirects;
-// anything else gets the login page. The key is stripped from a request before
-// it is forwarded, so the backend never sees it.
+// proof - the cookie an earlier unlock set, the key in a header or a bearer
+// token, the credentials a browser repeats after its sign-in prompt, or an
+// address that is unlocked or trusted. A link or the login form unlocks and
+// redirects; anything else gets the login page, or the sign-in prompt. The key
+// is stripped from a request before it is forwarded, so the backend never sees
+// it.
 func (g *Gate) CheckHTTP(req *http.Request) vhost.AllowDecision {
 	ip, ok := addrOf(req.RemoteAddr)
 	if !ok {
@@ -49,22 +51,28 @@ func (g *Gate) CheckHTTP(req *http.Request) vhost.AllowDecision {
 		g.strip(req)
 		return vhost.AllowDecisionOK
 	}
-	// A key in a header proves itself on every request - the way for apps and
-	// scripts that keep no cookies - so the right one is never counted.
-	if g.http {
-		if v := req.Header.Get(g.title); v != "" {
-			if g.keyMatches(v) {
-				g.strip(req)
-				return vhost.AllowDecisionOK
-			}
+	// A key that rides along on every request - a header or a bearer token,
+	// the way for apps and scripts that keep no cookies, or the credentials a
+	// browser repeats after its prompt - proves itself each time, so the right
+	// one is never counted.
+	if key, v, found := g.everyRequestKey(req); found {
+		if !g.keyMatches(key) {
 			g.noteFailure(ip)
-			return wrongKeyPage(req).decision()
+			return g.wrongKey(req, v).decision()
 		}
+		if v == viaBasic {
+			// Unlocked as well. The browser keeps repeating the credentials,
+			// but if the backend asks for a sign-in of its own, whatever the
+			// visitor types there replaces them.
+			g.unlock(ip)
+		}
+		g.strip(req)
+		return vhost.AllowDecisionOK
 	}
 	if !g.noteAttempt(ip) {
 		return vhost.AllowDecision{StatusCode: http.StatusForbidden}
 	}
-	if g.http && req.Method == http.MethodPost {
+	if req.Method == http.MethodPost {
 		if key, found := g.bodyKey(req); found {
 			return g.unlockAndRedirect(req, ip, key, http.StatusSeeOther)
 		}
@@ -81,7 +89,7 @@ func (g *Gate) ServeKnock(rw http.ResponseWriter, req *http.Request) {
 		http.Error(rw, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
-	g.knock(req, ip).serve(rw)
+	g.knock(req, ip, false).serve(rw)
 }
 
 // unlockAndRedirect judges a key from a link or the login form. The right one
@@ -113,10 +121,14 @@ func (g *Gate) hasValidCookie(req *http.Request) bool {
 	return err == nil && g.cookieValid(c.Value)
 }
 
-// strip removes the key header and the unlock cookie from a request on its way
-// to the backend.
+// strip removes what proved the key from a request on its way to the backend:
+// the key header, the Authorization header when it carries this proxy's
+// credentials rather than the backend's, and the unlock cookie.
 func (g *Gate) strip(req *http.Request) {
 	req.Header.Del(g.title)
+	if g.ownsAuthorization(req) {
+		req.Header.Del("Authorization")
+	}
 	cookies := req.Cookies()
 	found := false
 	for _, c := range cookies {

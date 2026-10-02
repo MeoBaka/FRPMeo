@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -171,6 +172,114 @@ var _ = ginkgo.Describe("[Feature: Secure Access]", func() {
 		framework.NewRequestExpect(f).Port(vhostHTTPPort).
 			RequestModify(func(r *request.Request) { host(r) }).
 			Explain("unlocked").Ensure()
+	})
+
+	ginkgo.It("HTTP: the sign-in prompt asks for the title and the key", func() {
+		vhostHTTPPort := f.AllocPort()
+		serverConf := consts.DefaultServerConfig + fmt.Sprintf(`
+		vhostHTTPPort = %d
+		`, vhostHTTPPort)
+		clientConf := consts.DefaultClientConfig + secureProxy(fmt.Sprintf(`
+		[[proxies]]
+		name = "web"
+		type = "http"
+		localPort = {{ .%s }}
+		customDomains = ["prompt.example.com"]
+		`, framework.HTTPSimpleServerPort), `secure.methods = ["basic"]`)
+		f.RunProcesses(serverConf, []string{clientConf})
+
+		host := func(r *request.Request) *request.Request {
+			return r.HTTP().HTTPHost("prompt.example.com")
+		}
+
+		framework.NewRequestExpect(f).Port(vhostHTTPPort).
+			RequestModify(func(r *request.Request) { host(r) }).
+			Explain("the browser is asked to sign in").
+			Ensure(func(resp *request.Response) bool {
+				return resp.Code == 401 && strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Basic ")
+			})
+
+		framework.NewRequestExpect(f).Port(vhostHTTPPort).
+			RequestModify(func(r *request.Request) { host(r).HTTPAuth(secureTitle, "wrong-key") }).
+			Explain("a wrong password is asked for again").
+			Ensure(framework.ExpectResponseCode(401))
+
+		framework.NewRequestExpect(f).Port(vhostHTTPPort).
+			RequestModify(func(r *request.Request) { host(r).HTTPAuth(secureTitle, secureKey) }).
+			Explain("the title as the username, the key as the password").Ensure()
+	})
+
+	ginkgo.It("HTTP: only the chosen ways are taken", func() {
+		vhostHTTPPort := f.AllocPort()
+		serverConf := consts.DefaultServerConfig + fmt.Sprintf(`
+		vhostHTTPPort = %d
+		`, vhostHTTPPort)
+		clientConf := consts.DefaultClientConfig + secureProxy(fmt.Sprintf(`
+		[[proxies]]
+		name = "web"
+		type = "http"
+		localPort = {{ .%s }}
+		customDomains = ["form.example.com"]
+		`, framework.HTTPSimpleServerPort), `secure.methods = ["form"]`)
+		f.RunProcesses(serverConf, []string{clientConf})
+
+		framework.NewRequestExpect(f).Port(vhostHTTPPort).
+			RequestModify(func(r *request.Request) {
+				r.HTTP().HTTPHost("form.example.com").HTTPHeaders(map[string]string{secureTitle: secureKey})
+			}).
+			Explain("a header is not one of the chosen ways").
+			Ensure(framework.ExpectResponseCode(401))
+
+		// The form unlocks and redirects; the client follows as an unlocked
+		// address and reaches the site.
+		framework.NewRequestExpect(f).Port(vhostHTTPPort).
+			RequestModify(func(r *request.Request) {
+				r.HTTP().HTTPParams("POST", "form.example.com", "/",
+					map[string]string{"Content-Type": "application/x-www-form-urlencoded"}).
+					Body([]byte(secureTitle + "=" + secureKey))
+			}).
+			Explain("a POST form is").Ensure()
+	})
+
+	ginkgo.It("TCP: the sign-in prompt unlocks the address", func() {
+		remotePort := f.AllocPort()
+		clientConf := consts.DefaultClientConfig + secureProxy(tcpProxy(remotePort), `secure.methods = ["basic"]`)
+		f.RunProcesses(consts.DefaultServerConfig, []string{clientConf})
+
+		framework.NewRequestExpect(f).Port(remotePort).
+			RequestModify(func(r *request.Request) { r.HTTP() }).
+			Explain("opening the port in a browser asks to sign in").
+			Ensure(func(resp *request.Response) bool {
+				return resp.Code == 401 && strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Basic ")
+			})
+
+		framework.NewRequestExpect(f).Port(remotePort).
+			RequestModify(func(r *request.Request) { r.HTTP().HTTPAuth(secureTitle, secureKey) }).
+			Ensure(framework.ExpectResponseCode(200))
+
+		framework.NewRequestExpect(f).Port(remotePort).Explain("unlocked").Ensure()
+	})
+
+	ginkgo.It("TCP: a bearer token goes through with its request", func() {
+		remotePort := f.AllocPort()
+		clientConf := consts.DefaultClientConfig + secureProxy(fmt.Sprintf(`
+		[[proxies]]
+		name = "api"
+		type = "tcp"
+		localPort = {{ .%s }}
+		remotePort = %d
+		`, framework.HTTPSimpleServerPort, remotePort), `secure.methods = ["bearer"]`)
+		f.RunProcesses(consts.DefaultServerConfig, []string{clientConf})
+
+		framework.NewRequestExpect(f).Port(remotePort).
+			RequestModify(func(r *request.Request) { r.HTTP() }).
+			Ensure(framework.ExpectResponseCode(401))
+
+		framework.NewRequestExpect(f).Port(remotePort).
+			RequestModify(func(r *request.Request) {
+				r.HTTP().HTTPHeaders(map[string]string{"Authorization": "Bearer " + secureKey})
+			}).
+			Explain("the backend's own answer, to the very request that carried the token").Ensure()
 	})
 
 	ginkgo.It("UDP: dropped until a link on the same port unlocks the address", func() {

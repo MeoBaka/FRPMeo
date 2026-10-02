@@ -17,7 +17,9 @@ package proxy
 import (
 	"errors"
 	"slices"
+	"strings"
 
+	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/msg"
 )
 
@@ -30,10 +32,40 @@ func isSecureUnsupported(err error) bool {
 	return errors.Is(err, ErrSecureUnsupported)
 }
 
+// secureMethodsError is returned for a secure proxy using methods an frps
+// without msg.FeatureSecureMethods does not know. That frps would refuse the
+// proxy rather than expose it, so this is about saying why before asking: the
+// answer it would give names a validation rule, not the version to install.
+// It counts as ErrSecureUnsupported, so it fails the start the same way.
+type secureMethodsError struct {
+	methods []string
+}
+
+func (e *secureMethodsError) Error() string {
+	return "frps does not understand the secure methods " + strings.Join(e.methods, ", ") +
+		"; update frps before using them on this proxy"
+}
+
+func (e *secureMethodsError) Is(target error) bool {
+	return target == ErrSecureUnsupported
+}
+
 // SetServerFeatures records what frps advertised at login. Call it before the
 // proxies start.
 func (pm *Manager) SetServerFeatures(features []string) {
 	pm.serverSecure.Store(slices.Contains(features, msg.FeatureSecureProxy))
+	pm.serverSecureMethods.Store(slices.Contains(features, msg.FeatureSecureMethods))
+}
+
+// checkSecureMethods fails a secure proxy whose methods frps would not know.
+func (pm *Manager) checkSecureMethods(s *msg.ProxySecure) error {
+	if s == nil || pm.serverSecureMethods.Load() {
+		return nil
+	}
+	if newer := v1.NewerSecureMethods(s.Methods); len(newer) > 0 {
+		return &secureMethodsError{methods: newer}
+	}
+	return nil
 }
 
 // IsSecure reports whether the named proxy has secure access switched on.

@@ -22,11 +22,33 @@ import (
 
 // The ways a visitor can present a secure proxy's key.
 const (
-	// SecureMethodLink takes the key from the URL query: ?<title>=<key>.
+	// SecureMethodLink takes the key from the URL query: ?<title>=<key>, a
+	// link opened once.
 	SecureMethodLink = "link"
 
-	// SecureMethodHTTP takes it from an HTTP header "<title>: <key>", or from
-	// a field <title> in a form or JSON request body - a POST, PUT and so on.
+	// SecureMethodBasic asks for it the way a site asks for a username and a
+	// password - the browser's own sign-in prompt, or any client's basic
+	// authentication - with the title as the username and the key as the
+	// password.
+	SecureMethodBasic = "basic"
+
+	// SecureMethodHeader takes it from a request header "<title>: <key>", on
+	// any request method.
+	SecureMethodHeader = "header"
+
+	// SecureMethodForm takes it from a field <title> of a form body, which is
+	// what a POST from an HTML form sends.
+	SecureMethodForm = "form"
+
+	// SecureMethodJSON takes it from a field <title> of a JSON body.
+	SecureMethodJSON = "json"
+
+	// SecureMethodBearer takes it from "Authorization: Bearer <key>", where API
+	// clients send an API key.
+	SecureMethodBearer = "bearer"
+
+	// SecureMethodHTTP is header, form and json together: the single switch
+	// the first version had, kept so the configs written for it mean the same.
 	SecureMethodHTTP = "http"
 
 	// SecureMethodLine takes it from the first line of a raw TCP connection,
@@ -34,9 +56,33 @@ const (
 	SecureMethodLine = "line"
 )
 
-// SecureMethods lists every method. An empty SecureConfig.Methods means all of
-// them.
-var SecureMethods = []string{SecureMethodLink, SecureMethodHTTP, SecureMethodLine}
+// SecureMethods lists every method name a config may use.
+var SecureMethods = []string{
+	SecureMethodLink, SecureMethodBasic, SecureMethodHeader, SecureMethodForm,
+	SecureMethodJSON, SecureMethodBearer, SecureMethodHTTP, SecureMethodLine,
+}
+
+// DefaultSecureMethods is what an empty SecureConfig.Methods means: what the
+// first version offered. basic and bearer are only on when named - basic
+// changes what a browser sees first, and bearer takes a header the backend may
+// want for itself.
+var DefaultSecureMethods = []string{SecureMethodLink, SecureMethodHTTP, SecureMethodLine}
+
+// firstSecureMethods are the method names an frps without
+// msg.FeatureSecureMethods understands.
+var firstSecureMethods = []string{SecureMethodLink, SecureMethodHTTP, SecureMethodLine}
+
+// NewerSecureMethods returns the methods in methods that an frps without
+// msg.FeatureSecureMethods would refuse as unknown.
+func NewerSecureMethods(methods []string) []string {
+	var out []string
+	for _, m := range methods {
+		if !slices.Contains(firstSecureMethods, m) && !slices.Contains(out, m) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
 
 // Defaults for the SecureConfig fields where 0 means "the default".
 const (
@@ -47,9 +93,10 @@ const (
 )
 
 // SecureConfig locks a proxy behind a key. A visitor has to present
-// "<title>: <key>" - by link, by HTTP request, or as the first line of the
-// connection - before frps forwards anything to the backend; everyone else is
-// refused. frps enforces it, so it covers every public proxy type.
+// "<title>: <key>" - by link, at a sign-in prompt, in an HTTP request, or as
+// the first line of the connection - before frps forwards anything to the
+// backend; everyone else is refused. frps enforces it, so it covers every
+// public proxy type.
 type SecureConfig struct {
 	Enable bool `json:"enable,omitempty"`
 
@@ -60,8 +107,9 @@ type SecureConfig struct {
 	// Key is the secret itself - the "custom desc".
 	Key string `json:"key,omitempty"`
 
-	// Methods selects how the key may be presented: "link", "http" and "line".
-	// Empty means all of them.
+	// Methods selects how the key may be presented: "link", "basic",
+	// "header", "form", "json", "bearer" and "line" - "http" being header, form
+	// and json together. Empty means DefaultSecureMethods: link, http and line.
 	Methods []string `json:"methods,omitempty"`
 
 	// UnlockSeconds is how long a source IP stays unlocked after presenting
@@ -103,7 +151,18 @@ func (c SecureConfig) Clone() SecureConfig {
 
 // HasMethod reports whether the key may be presented by method m.
 func (c *SecureConfig) HasMethod(m string) bool {
-	return len(c.Methods) == 0 || slices.Contains(c.Methods, m)
+	methods := c.Methods
+	if len(methods) == 0 {
+		methods = DefaultSecureMethods
+	}
+	if slices.Contains(methods, m) {
+		return true
+	}
+	switch m {
+	case SecureMethodHeader, SecureMethodForm, SecureMethodJSON:
+		return slices.Contains(methods, SecureMethodHTTP)
+	}
+	return false
 }
 
 // SecureLineApplies reports whether visitors of proxyType can present the key

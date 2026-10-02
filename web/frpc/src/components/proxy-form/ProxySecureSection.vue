@@ -16,13 +16,28 @@
         </div>
       </div>
 
+      <div class="secure-ways-title">Ways to present the key - choose one or more</div>
       <div class="field-row three-col">
-        <ConfigField label="Link (?title=key)" type="switch" v-model="form.secureMethodLink" prop="secureMethodLink"
+        <ConfigField label="Link (GET ?title=key)" type="switch" v-model="form.secureMethodLink" prop="secureMethodLink"
           tip="Open once to unlock your IP" :readonly="readonly" />
-        <ConfigField label="HTTP Request (header / POST)" type="switch" v-model="form.secureMethodHTTP"
-          tip="For scripts and apps" :readonly="readonly" />
+        <ConfigField label="Sign-in Prompt" type="switch" v-model="form.secureMethodBasic"
+          tip="Opening the address asks: username = title, password = key" :readonly="readonly" />
         <ConfigField v-if="lineApplies" label="First Line (raw TCP / UDP)" type="switch"
           v-model="form.secureMethodLine" tip="Custom clients send it first" :readonly="readonly" />
+      </div>
+
+      <div class="secure-ways-title">HTTP request - for scripts and apps</div>
+      <div class="field-row three-col">
+        <ConfigField label="Header" type="switch" v-model="form.secureMethodHeader"
+          tip="title: key, on any method" :readonly="readonly" />
+        <ConfigField label="POST Form" type="switch" v-model="form.secureMethodForm"
+          tip="title=key in a form body" :readonly="readonly" />
+        <ConfigField label="POST JSON" type="switch" v-model="form.secureMethodJSON"
+          tip='{"title": "key"} as the body' :readonly="readonly" />
+      </div>
+      <div class="field-row three-col">
+        <ConfigField label="Bearer Token" type="switch" v-model="form.secureMethodBearer"
+          tip="Authorization: Bearer key - API clients' API key" :readonly="readonly" />
       </div>
 
       <div class="field-row three-col">
@@ -122,7 +137,8 @@ const unlockOptions = computed(() => {
 
 const lineApplies = computed(() => secureLineApplies(form.value.type))
 const UDP_TYPES = ['udp', 'pe']
-const TCPMUX_TUNNEL = 'curl -p -x http://<frps-address>:<tcpmux-port> '
+// tcpmux is reached through frps' HTTP CONNECT port, so curl goes through it.
+const TCPMUX_TUNNEL = '-p -x http://<frps-address>:<tcpmux-port> '
 
 const domainOf = (f: ProxyFormData) =>
   f.customDomains.find(Boolean) ||
@@ -159,21 +175,31 @@ const usage = computed((): UsageItem[] => {
   const masked = f.secureKey ? '••••••' : '<key>'
   const base = linkBase.value
   const tunnel = f.type === 'tcpmux' ? TCPMUX_TUNNEL : ''
+  const curl = (args: string) => `curl ${tunnel}${args}`
   const items: UsageItem[] = []
+  const add = (label: string, cmd: (k: string) => string) =>
+    items.push({ label, display: cmd(masked), value: cmd(key) })
 
   if (f.secureMethodLink) {
-    const link = (k: string) => (tunnel ? `${tunnel}"${base}/?${title}=${k}"` : `${base}/?${title}=${k}`)
+    const link = (k: string) => (tunnel ? curl(`"${base}/?${title}=${k}"`) : `${base}/?${title}=${k}`)
     items.push({ label: 'Link', display: link(masked), value: link(encodeURIComponent(key)) })
   }
-  if (f.secureMethodHTTP) {
-    // On an http proxy the header rides along on ordinary requests; everywhere
-    // else the request only unlocks the caller's IP.
-    const cmd = (k: string) =>
-      f.type === 'http'
-        ? `curl -H "${title}: ${k}" ${base}/`
-        : `curl ${tunnel}-X POST ${base}/ -H "${title}: ${k}"`
-    items.push({ label: 'HTTP request', display: cmd(masked), value: cmd(key) })
+  if (f.secureMethodBasic) {
+    // A browser shows its own prompt for this address; a script passes the
+    // same pair as a username and password.
+    items.push({
+      label: 'Sign-in prompt',
+      display: `${base}/  (username: ${title}, password: ${masked})`,
+      value: `${base}/`,
+    })
+    add('Sign-in (script)', (k) => curl(`-u "${title}:${k}" ${base}/`))
   }
+  if (f.secureMethodHeader) add('Header', (k) => curl(`-H "${title}: ${k}" ${base}/`))
+  if (f.secureMethodForm) add('POST form', (k) => curl(`-d "${title}=${k}" ${base}/`))
+  if (f.secureMethodJSON) {
+    add('POST JSON', (k) => curl(`-H "Content-Type: application/json" -d '{"${title}":"${k}"}' ${base}/`))
+  }
+  if (f.secureMethodBearer) add('Bearer token', (k) => curl(`-H "Authorization: Bearer ${k}" ${base}/`))
   if (f.secureMethodLine && lineApplies.value) {
     const line = (k: string) => `${title}: ${k}`
     items.push({
@@ -188,18 +214,18 @@ const usage = computed((): UsageItem[] => {
 const usageNote = computed(() => {
   switch (form.value.type) {
     case 'http':
-      return 'The link sets a cookie and unlocks your IP; apps can send the header on every request instead.'
+      return 'The link and the sign-in prompt unlock your IP (the link also sets a cookie); apps can send the header or a bearer token on every request instead.'
     case 'https':
-      return 'TLS passes through frps untouched, so open the link over plain http:// on the frps HTTP port first.'
+      return 'TLS passes through frps untouched, so unlock over plain http:// on the frps HTTP port first.'
     case 'udp':
     case 'pe':
-      return 'Open the link (frps answers it over TCP on the same port) or send the line as one datagram, then connect as usual.'
+      return 'Unlock over http:// (frps answers it over TCP on the same port) or send the line as one datagram, then connect as usual.'
     case 'tcpmux':
       return 'The key travels inside the CONNECT tunnel; once your IP is unlocked, connect as usual.'
     case 'mc':
-      return 'Open the link with the server hostname players type in the game, then join as usual.'
+      return 'Unlock with the server hostname players type in the game, then join as usual.'
     default:
-      return 'Once unlocked, any app from that IP - game, RDP, SSH - connects as usual for the unlock duration.'
+      return 'Once unlocked, any app from that IP - game, RDP, SSH - connects as usual for the unlock duration. A request with the bearer token goes straight through to the backend, for API clients.'
   }
 })
 
@@ -241,6 +267,12 @@ const copy = async (text: string) => {
 
 .secure-generate {
   margin-bottom: 2px;
+}
+
+.secure-ways-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
 }
 
 .secure-usage {

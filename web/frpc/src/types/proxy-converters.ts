@@ -222,21 +222,48 @@ export function formToStoreProxy(form: ProxyFormData): ProxyDefinition {
   )
 }
 
+// secureMethodsToStore turns the switches into secure.methods, or undefined when
+// nothing needs writing. frps reads an empty list as link, header, form, json
+// and line - the first version's methods - so that choice is left out, and
+// header, form and json together are written as "http", which an frps from
+// before the newer methods understands too. The form refuses to save a secure
+// proxy with no way in at all.
+function secureMethodsToStore(form: ProxyFormData): string[] | undefined {
+  const lineApplies = secureLineApplies(form.type)
+  const line = form.secureMethodLine && lineApplies
+  const allHTTP =
+    form.secureMethodHeader && form.secureMethodForm && form.secureMethodJSON
+  const isDefault =
+    form.secureMethodLink &&
+    allHTTP &&
+    (line || !lineApplies) &&
+    !form.secureMethodBasic &&
+    !form.secureMethodBearer
+  if (isDefault) return undefined
+
+  const methods: string[] = []
+  if (form.secureMethodLink) methods.push('link')
+  if (form.secureMethodBasic) methods.push('basic')
+  if (allHTTP) {
+    methods.push('http')
+  } else {
+    if (form.secureMethodHeader) methods.push('header')
+    if (form.secureMethodForm) methods.push('form')
+    if (form.secureMethodJSON) methods.push('json')
+  }
+  if (form.secureMethodBearer) methods.push('bearer')
+  if (line) methods.push('line')
+  return methods.length > 0 ? methods : undefined
+}
+
 function secureFormToStore(form: ProxyFormData): Record<string, any> {
   const secure: Record<string, any> = {}
   if (form.secureEnable) secure.enable = true
   if (form.secureTitle) secure.title = form.secureTitle
   if (form.secureKey) secure.key = form.secureKey
 
-  const lineApplies = secureLineApplies(form.type)
-  const methods: string[] = []
-  if (form.secureMethodLink) methods.push('link')
-  if (form.secureMethodHTTP) methods.push('http')
-  if (form.secureMethodLine && lineApplies) methods.push('line')
-  // frps reads an empty list as every method that applies, so only a narrower
-  // choice is written. The form refuses to save a secure proxy with none.
-  const available = lineApplies ? 3 : 2
-  if (methods.length > 0 && methods.length < available) secure.methods = methods
+  const methods = secureMethodsToStore(form)
+  if (methods) secure.methods = methods
 
   if (form.secureUnlockSeconds > 0) {
     secure.unlockSeconds = form.secureUnlockSeconds
@@ -594,11 +621,20 @@ export function storeProxyToForm(config: ProxyDefinition): ProxyFormData {
     form.secureEnable = s.enable === true
     form.secureTitle = s.title || ''
     form.secureKey = s.key || ''
-    // An empty list means every method.
-    const methods: string[] = Array.isArray(s.methods) ? s.methods : []
-    form.secureMethodLink = methods.length === 0 || methods.includes('link')
-    form.secureMethodHTTP = methods.length === 0 || methods.includes('http')
-    form.secureMethodLine = methods.length === 0 || methods.includes('line')
+    // An empty list means the first version's methods, and "http" is header,
+    // form and json together.
+    const methods: string[] =
+      Array.isArray(s.methods) && s.methods.length > 0
+        ? s.methods
+        : ['link', 'http', 'line']
+    const has = (m: string) => methods.includes(m)
+    form.secureMethodLink = has('link')
+    form.secureMethodBasic = has('basic')
+    form.secureMethodHeader = has('header') || has('http')
+    form.secureMethodForm = has('form') || has('http')
+    form.secureMethodJSON = has('json') || has('http')
+    form.secureMethodBearer = has('bearer')
+    form.secureMethodLine = has('line')
     form.secureUnlockSeconds = s.unlockSeconds || 0
     form.secureAllowIPs = Array.isArray(s.allowIPs) ? s.allowIPs : []
     form.secureTrustedIPs = Array.isArray(s.trustedIPs) ? s.trustedIPs : []

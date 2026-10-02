@@ -234,12 +234,18 @@ localPort = 25565
 remotePort = 6010
 # Secure access: frps refuses every visitor until they present the key. It takes
 # the key in these ways itself, and the backend never sees any of them:
-#   link: open http://{serverAddr}:6010/?dangnhap=YOUR_KEY once; the visitor's IP
-#         is unlocked for secure.unlockSeconds, then any app connects as usual
-#   http: any request with the header "dangnhap: YOUR_KEY" (or a form/JSON field),
-#         e.g. curl -X POST http://{serverAddr}:6010/ -H "dangnhap: YOUR_KEY"
-#   line: "dangnhap: YOUR_KEY" as the first line of the connection, with the
-#         rest going to the backend - for clients you write yourself
+#   link:   open http://{serverAddr}:6010/?dangnhap=YOUR_KEY once; the visitor's
+#           IP is unlocked for secure.unlockSeconds, then any app connects as usual
+#   basic:  open http://{serverAddr}:6010/ and the browser asks for a username
+#           and password: dangnhap and YOUR_KEY (curl -u "dangnhap:YOUR_KEY" ...)
+#   header: a request with the header "dangnhap: YOUR_KEY", on any method
+#   form:   a POST with the form field dangnhap=YOUR_KEY
+#   json:   a POST with the JSON body {"dangnhap": "YOUR_KEY"}
+#   bearer: "Authorization: Bearer YOUR_KEY"; on a tcp proxy that request goes
+#           straight through to the backend, for API clients
+#   line:   "dangnhap: YOUR_KEY" as the first line of the connection, with the
+#           rest going to the backend - for clients you write yourself
+#   http:   header, form and json together
 # Works for tcp, udp, http, https, tcpmux, tcp+udp, mc and pe proxies, but not in
 # a loadBalancer group. frpc will not start the proxy on an frps without support.
 secure.enable = true
@@ -247,8 +253,8 @@ secure.enable = true
 secure.title = "dangnhap"
 # The key itself, 6-256 characters
 secure.key = "change-me-please"
-# Accepted ways; empty means every way the proxy type allows
-# secure.methods = ["link", "http", "line"]
+# Accepted ways; empty means link, http and line - basic and bearer only when listed
+# secure.methods = ["link", "basic", "header", "form", "json", "bearer", "line"]
 # How long an unlocked IP stays unlocked, default 43200 (12 hours)
 # secure.unlockSeconds = 43200
 # If set, only these IPs or CIDRs may connect at all - and they still need the key

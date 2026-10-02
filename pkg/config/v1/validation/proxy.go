@@ -213,6 +213,10 @@ func validateTCPMuxProxyConfigForClient(c *v1.TCPMuxProxyConfig) error {
 }
 
 func validateHTTPProxyConfigForClient(c *v1.HTTPProxyConfig) error {
+	if err := validateSecureHTTPAuth(c); err != nil {
+		return err
+	}
+
 	return validateDomainConfigForClient(&c.DomainConfig)
 }
 
@@ -394,6 +398,10 @@ func validateTCPMuxProxyConfigForServer(c *v1.TCPMuxProxyConfig, s *v1.ServerCon
 func validateHTTPProxyConfigForServer(c *v1.HTTPProxyConfig, s *v1.ServerConfig) error {
 	if s.VhostHTTPPort == 0 {
 		return fmt.Errorf("type [http] not supported when vhost http port is not set")
+	}
+
+	if err := validateSecureHTTPAuth(c); err != nil {
+		return err
 	}
 
 	return validateDomainConfigForServer(&c.DomainConfig, s)

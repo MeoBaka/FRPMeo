@@ -66,6 +66,10 @@ type Manager struct {
 	// taking pm.mu could deadlock against UpdateAll.
 	serverSecure atomic.Bool
 
+	// serverSecureMethods is whether it also understands the secure methods
+	// added after the first version. See msg.FeatureSecureMethods.
+	serverSecureMethods atomic.Bool
+
 	ctx context.Context
 }
 
@@ -158,6 +162,9 @@ func (pm *Manager) HandleEvent(payload any) error {
 		// one. The wrapper turns this into a start error.
 		if e.NewProxyMsg.Secure != nil && !pm.serverSecure.Load() {
 			return ErrSecureUnsupported
+		}
+		if err := pm.checkSecureMethods(e.NewProxyMsg.Secure); err != nil {
+			return err
 		}
 
 		m = e.NewProxyMsg
