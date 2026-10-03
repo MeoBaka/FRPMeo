@@ -68,8 +68,10 @@ export interface ProxyFormData {
   // Secure access (SecureConfig) - every type in SECURE_PROXY_TYPES. One
   // switch per way of presenting the key; secure.methods is built from them.
   secureEnable: boolean
+  // The first login is title and key; the rest are secure.credentials.
   secureTitle: string
   secureKey: string
+  secureCredentials: Array<{ title: string; key: string }>
   secureMethodLink: boolean
   secureMethodBasic: boolean
   secureMethodHeader: boolean
@@ -207,6 +209,7 @@ export function createDefaultProxyForm(): ProxyFormData {
     secureEnable: false,
     secureTitle: '',
     secureKey: '',
+    secureCredentials: [],
     // The defaults are what frps reads an empty list as. The sign-in prompt
     // and bearer tokens are only on when chosen.
     secureMethodLink: true,

@@ -17,13 +17,11 @@ package secure
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"strings"
 	"time"
 
@@ -98,7 +96,15 @@ func (g *Gate) AdmitConn(c net.Conn) (net.Conn, Verdict) {
 		if conn, ok := g.passBearer(c, br, ip); ok {
 			return conn, Pass
 		}
-		g.answerKnock(c, br, ip, g.pageLink)
+		after := showUnlocked
+		if g.rawPort {
+			after = showUnlockedWithLinks
+		}
+		g.answerKnock(c, br, ip, after)
+		return c, Answered
+	}
+	if g.rawPort && g.TakesRequests() && looksLikeTLS(br) {
+		g.answerTLSKnock(c, br, ip)
 		return c, Answered
 	}
 	// Only wait for a whole line if what arrived could be one: a game's binary
@@ -147,7 +153,7 @@ func (g *Gate) answerKnockConn(c net.Conn) {
 	}
 	switch {
 	case looksLikeHTTP(br):
-		g.answerKnock(c, br, ip, false)
+		g.answerKnock(c, br, ip, showUnlocked)
 	case g.line && g.mayBeLine(buffered(br)):
 		// With no stream behind it to pass on, a key line here unlocks the
 		// address the way a link does.
@@ -192,121 +198,53 @@ func (g *Gate) AdmitPacket(remoteAddr string, packet []byte) bool {
 }
 
 // answerKnock reads one HTTP request from a source that is not admitted,
-// judges the key in it and answers. It never reaches the backend. pageLink is
-// whether the page the request asked for lives behind this port.
-func (g *Gate) answerKnock(c net.Conn, br *bufio.Reader, ip netip.Addr, pageLink bool) {
+// judges the key in it and answers. It never reaches the backend.
+func (g *Gate) answerKnock(c net.Conn, br *bufio.Reader, ip netip.Addr, after onUnlock) {
 	_ = c.SetDeadline(time.Now().Add(knockTimeout))
 	req, err := http.ReadRequest(bufio.NewReader(io.LimitReader(br, maxKnockRequest)))
 	if err != nil {
 		return
 	}
 	req.RemoteAddr = c.RemoteAddr().String()
-	_ = g.knock(req, ip, pageLink).write(c, req)
+	_ = g.knock(req, ip, after).write(c, req)
 }
+
+// onUnlock is how a request that unlocked its address is answered.
+type onUnlock int
+
+const (
+	// showUnlocked confirms the unlock: the request came in somewhere the
+	// page it asked for is not.
+	showUnlocked onUnlock = iota
+
+	// showUnlockedWithLinks adds links back to the page over http and https,
+	// for a raw port whose backend may be that website.
+	showUnlockedWithLinks
+
+	// redirectBack sends the request on to where it was going: a visitor who
+	// came over TLS asked for a website, and only the backend can serve it.
+	redirectBack
+)
 
 // knock judges an unlock request: one made to frps rather than to the
 // backend. The right key unlocks the source address.
-func (g *Gate) knock(req *http.Request, ip netip.Addr, pageLink bool) answer {
-	key, v, found := g.keyFromRequest(req)
+func (g *Gate) knock(req *http.Request, ip netip.Addr, after onUnlock) answer {
+	p, found := g.keyFromRequest(req)
 	if !found {
 		return g.loginPage(req)
 	}
-	if !g.keyMatches(key) {
+	if !g.valid(p) {
 		g.noteFailure(ip)
-		return g.wrongKey(req, v)
+		return g.wrongKey(req, p.via)
 	}
 	g.unlock(ip)
-	return g.unlockedPage(req, ip, pageLink)
-}
-
-// via is how a key arrived, where that changes the answer to a wrong one.
-type via int
-
-const (
-	// viaRequest is every way but basic.
-	viaRequest via = iota
-
-	// viaBasic is basic authentication, where a wrong key is answered by
-	// asking again, the way any site answers a wrong password.
-	viaBasic
-)
-
-// keyFromRequest finds a key wherever the enabled methods allow it in an
-// unlock request: a header, a bearer token, basic credentials, the query
-// (link), or a form or JSON body.
-func (g *Gate) keyFromRequest(req *http.Request) (string, via, bool) {
-	if key, v, ok := g.everyRequestKey(req); ok {
-		return key, v, true
+	switch after {
+	case redirectBack:
+		return g.redirectBack(req, p.via)
+	case showUnlockedWithLinks:
+		return g.unlockedPage(req, ip, true)
 	}
-	if g.link {
-		if key, ok := g.queryKey(req); ok {
-			return key, viaRequest, true
-		}
-	}
-	key, ok := g.bodyKey(req)
-	return key, viaRequest, ok
-}
-
-// everyRequestKey finds a key of the kind a client sends with every request
-// rather than once to unlock: the title header, a bearer token, or basic
-// credentials naming the title. Basic credentials for any other username are
-// somebody else's - the backend's own sign-in, say - and are left alone.
-func (g *Gate) everyRequestKey(req *http.Request) (string, via, bool) {
-	if g.header {
-		if key := req.Header.Get(g.title); key != "" {
-			return key, viaRequest, true
-		}
-	}
-	if g.bearer {
-		if key, ok := bearerToken(req); ok {
-			return key, viaRequest, true
-		}
-	}
-	if key, ok := g.basicKey(req); ok {
-		return key, viaBasic, true
-	}
-	return "", viaRequest, false
-}
-
-// basicKey finds the password of basic credentials whose username is the
-// title.
-func (g *Gate) basicKey(req *http.Request) (string, bool) {
-	if !g.basic {
-		return "", false
-	}
-	user, pass, ok := req.BasicAuth()
-	if !ok || !strings.EqualFold(user, g.title) {
-		return "", false
-	}
-	return pass, true
-}
-
-// ownsAuthorization reports whether the request's Authorization header carries
-// this proxy's key, and so is frps' to take out rather than the backend's.
-func (g *Gate) ownsAuthorization(req *http.Request) bool {
-	if g.bearer {
-		if key, ok := bearerToken(req); ok {
-			return g.keyMatches(key)
-		}
-	}
-	if key, ok := g.basicKey(req); ok {
-		return g.keyMatches(key)
-	}
-	return false
-}
-
-// bearerToken reads "Authorization: Bearer <token>".
-func bearerToken(req *http.Request) (string, bool) {
-	return parseBearer(req.Header.Get("Authorization"))
-}
-
-func parseBearer(value string) (string, bool) {
-	scheme, token, ok := strings.Cut(strings.TrimSpace(value), " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
-		return "", false
-	}
-	token = strings.TrimSpace(token)
-	return token, token != ""
+	return g.unlockedPage(req, ip, false)
 }
 
 // passBearer lets a request that carries the key as a bearer token through to
@@ -340,7 +278,7 @@ func (g *Gate) passBearer(c net.Conn, br *bufio.Reader, ip netip.Addr) (net.Conn
 		return nil, false
 	}
 	key, ok := bearerToken(req)
-	if !ok || !g.keyMatches(key) {
+	if !ok || !g.matches("", key) {
 		return nil, false
 	}
 	// Built before the discard: raw points into the reader's buffer.
@@ -372,94 +310,6 @@ func headerBlockLen(br *bufio.Reader) (int, bool) {
 	}
 }
 
-// withoutKeyHeaders is a header block with the headers that carried the key
-// taken out: the title header, and an Authorization header holding this
-// proxy's bearer token. A continuation line goes with the header it continues.
-func (g *Gate) withoutKeyHeaders(raw []byte) []byte {
-	lines := bytes.Split(bytes.TrimSuffix(raw, []byte("\r\n\r\n")), []byte("\r\n"))
-	out := make([]byte, 0, len(raw))
-	dropping := false
-	for i, line := range lines {
-		if i > 0 {
-			continued := len(line) > 0 && (line[0] == ' ' || line[0] == '\t')
-			if !continued {
-				dropping = g.carriesKey(line)
-			}
-			if dropping {
-				continue
-			}
-		}
-		out = append(out, line...)
-		out = append(out, "\r\n"...)
-	}
-	return append(out, "\r\n"...)
-}
-
-// carriesKey reports whether a header line is one withoutKeyHeaders removes.
-func (g *Gate) carriesKey(line []byte) bool {
-	name, value, ok := bytes.Cut(line, []byte(":"))
-	if !ok {
-		return false
-	}
-	name = bytes.TrimSpace(name)
-	if bytes.EqualFold(name, []byte(g.title)) {
-		return true
-	}
-	if !bytes.EqualFold(name, []byte("Authorization")) {
-		return false
-	}
-	key, ok := parseBearer(string(value))
-	return ok && g.keyMatches(key)
-}
-
-func (g *Gate) queryKey(req *http.Request) (string, bool) {
-	for name, values := range req.URL.Query() {
-		if strings.EqualFold(name, g.title) && len(values) > 0 {
-			return values[0], true
-		}
-	}
-	return "", false
-}
-
-// bodyKey looks for a field named after the title in a JSON body (json) or a
-// form body (form).
-func (g *Gate) bodyKey(req *http.Request) (string, bool) {
-	if req.Body == nil {
-		return "", false
-	}
-	isJSON := strings.HasPrefix(req.Header.Get("Content-Type"), "application/json")
-	if (isJSON && !g.json) || (!isJSON && !g.form) {
-		return "", false
-	}
-	body, err := io.ReadAll(io.LimitReader(req.Body, maxKnockBody))
-	if err != nil || len(body) == 0 {
-		return "", false
-	}
-	if isJSON {
-		var fields map[string]any
-		if json.Unmarshal(body, &fields) != nil {
-			return "", false
-		}
-		for name, v := range fields {
-			if s, ok := v.(string); ok && strings.EqualFold(name, g.title) {
-				return s, true
-			}
-		}
-		return "", false
-	}
-	// A form, or a body sent with no type at all.
-	values, err := url.ParseQuery(string(body))
-	if err != nil {
-		return "", false
-	}
-	for name, v := range values {
-		if strings.EqualFold(name, g.title) && len(v) > 0 {
-			return v[0], true
-		}
-	}
-	return "", false
-}
-
 type keyResult int
 
 const (
@@ -469,10 +319,16 @@ const (
 	keyGood
 )
 
-// mayBeLine reports whether what has arrived so far could start "<title>:".
+// mayBeLine reports whether what has arrived so far could start "<title>:"
+// for one of the titles.
 func (g *Gate) mayBeLine(head []byte) bool {
-	n := min(len(head), len(g.title))
-	return n > 0 && bytes.EqualFold(head[:n], []byte(g.title[:n]))
+	for _, t := range g.titles {
+		n := min(len(head), len(t))
+		if n > 0 && bytes.EqualFold(head[:n], []byte(t[:n])) {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Gate) readLine(br *bufio.Reader) keyResult {
@@ -483,13 +339,18 @@ func (g *Gate) readLine(br *bufio.Reader) keyResult {
 	return g.judgeLine(line)
 }
 
-// judgeLine judges "<title>: <key>", with or without its line ending.
+// judgeLine judges "<title>: <key>" for any of the titles, with or without its
+// line ending.
 func (g *Gate) judgeLine(line []byte) keyResult {
 	name, value, ok := strings.Cut(strings.TrimRight(string(line), "\r\n"), ":")
-	if !ok || !strings.EqualFold(strings.TrimSpace(name), g.title) {
+	if !ok {
 		return keyAbsent
 	}
-	if g.keyMatches(strings.TrimSpace(value)) {
+	title, ok := g.titleOf(strings.TrimSpace(name))
+	if !ok {
+		return keyAbsent
+	}
+	if g.matches(title, strings.TrimSpace(value)) {
 		return keyGood
 	}
 	return keyWrong

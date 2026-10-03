@@ -33,6 +33,10 @@ var secureTitlePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // forwarding a request, so one of these would take the request apart.
 var secureReservedTitles = []string{"host", "cookie", "connection", "content-length", "content-type", "transfer-encoding"}
 
+// secureFormFields are the names frps' own sign-in form sends the title and
+// the key under. A title of either name would read as one of them.
+var secureFormFields = []string{v1.SecureFormTitleField, v1.SecureFormKeyField}
+
 const (
 	minSecureKeyLen = 6
 	maxSecureKeyLen = 256
@@ -62,17 +66,14 @@ func validateSecureConfig(base *v1.ProxyBaseConfig) error {
 	if base.LoadBalancer.Group != "" {
 		return errors.New("secure: not supported together with loadBalancer.group")
 	}
-	if !secureTitlePattern.MatchString(c.Title) {
-		return errors.New("secure.title: 1-64 letters, digits, '-' or '_' (for example \"auth\" or \"dangnhap\")")
-	}
-	if slices.Contains(secureReservedTitles, strings.ToLower(c.Title)) {
-		return fmt.Errorf("secure.title: %q is a header HTTP itself relies on, choose another name", c.Title)
-	}
-	if len(c.Key) < minSecureKeyLen || len(c.Key) > maxSecureKeyLen {
-		return fmt.Errorf("secure.key: must be %d-%d characters", minSecureKeyLen, maxSecureKeyLen)
-	}
-	if strings.TrimSpace(c.Key) != c.Key || strings.ContainsFunc(c.Key, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-		return errors.New("secure.key: no leading or trailing spaces and no control characters")
+	for i, cr := range c.AllCredentials() {
+		field := "secure"
+		if i > 0 {
+			field = fmt.Sprintf("secure.credentials[%d]", i-1)
+		}
+		if err := validateSecureCredential(field, cr, c); err != nil {
+			return err
+		}
 	}
 	for _, m := range c.Methods {
 		if !slices.Contains(v1.SecureMethods, m) {
@@ -84,12 +85,6 @@ func validateSecureConfig(base *v1.ProxyBaseConfig) error {
 			return fmt.Errorf("secure.methods: %q is not supported for %s proxies, which have no first line to carry a key", m, base.Type)
 		}
 	}
-	// basic and bearer read the Authorization header, so a title of that name
-	// would have the header method read the same header as well.
-	if (c.HasMethod(v1.SecureMethodBasic) || c.HasMethod(v1.SecureMethodBearer)) &&
-		strings.EqualFold(c.Title, "authorization") {
-		return errors.New("secure.title: \"authorization\" is the header basic and bearer use, choose another name")
-	}
 	if c.UnlockSeconds < 0 {
 		return errors.New("secure.unlockSeconds: must not be negative")
 	}
@@ -97,6 +92,33 @@ func validateSecureConfig(base *v1.ProxyBaseConfig) error {
 		return err
 	}
 	return validateSecureIPList("secure.trustedIPs", c.TrustedIPs)
+}
+
+// validateSecureCredential checks one title/key pair. field names it in the
+// error: "secure" for the first, "secure.credentials[i]" for the rest.
+func validateSecureCredential(field string, cr v1.SecureCredential, c *v1.SecureConfig) error {
+	if !secureTitlePattern.MatchString(cr.Title) {
+		return fmt.Errorf("%s.title: 1-64 letters, digits, '-' or '_' (for example \"auth\" or \"dangnhap\")", field)
+	}
+	if slices.Contains(secureReservedTitles, strings.ToLower(cr.Title)) {
+		return fmt.Errorf("%s.title: %q is a header HTTP itself relies on, choose another name", field, cr.Title)
+	}
+	if slices.Contains(secureFormFields, strings.ToLower(cr.Title)) {
+		return fmt.Errorf("%s.title: %q is a field of frps' own sign-in form, choose another name", field, cr.Title)
+	}
+	// basic and bearer read the Authorization header, so a title of that name
+	// would have the header method read the same header as well.
+	if (c.HasMethod(v1.SecureMethodBasic) || c.HasMethod(v1.SecureMethodBearer)) &&
+		strings.EqualFold(cr.Title, "authorization") {
+		return fmt.Errorf("%s.title: \"authorization\" is the header basic and bearer use, choose another name", field)
+	}
+	if len(cr.Key) < minSecureKeyLen || len(cr.Key) > maxSecureKeyLen {
+		return fmt.Errorf("%s.key: must be %d-%d characters", field, minSecureKeyLen, maxSecureKeyLen)
+	}
+	if strings.TrimSpace(cr.Key) != cr.Key || strings.ContainsFunc(cr.Key, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return fmt.Errorf("%s.key: no leading or trailing spaces and no control characters", field)
+	}
+	return nil
 }
 
 // validateSecureHTTPAuth refuses basic and bearer on an http proxy that has

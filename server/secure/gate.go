@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,17 +61,22 @@ const (
 // Gate enforces one proxy's secure access settings. It is safe for concurrent
 // use.
 type Gate struct {
-	title  string
-	keySum [sha256.Size]byte
+	// creds are the title/key pairs that open the proxy, and titles the
+	// distinct titles among them in the order they came.
+	creds  []credential
+	titles []string
 
 	// The ways the key may be presented, narrowed to what the proxy type can
 	// carry.
 	link, basic, header, form, json, bearer, line bool
 
-	// pageLink puts a link back to the page on the unlocked page. Only for the
-	// raw ports - tcp, tcp+udp - where the backend may well be a website the
-	// visitor came for; elsewhere the page they asked for is not on this port.
-	pageLink bool
+	// rawPort is set for tcp and tcp+udp, where the backend may well be a
+	// website the visitor came for. The unlocked page links back to it, and a
+	// TLS request is answered over frps' own TLS so that a visitor who typed
+	// https:// can still sign in. Elsewhere the page they asked for is not on
+	// this port, or TLS has a better way in: https proxies are unlocked over
+	// frps' http port.
+	rawPort bool
 
 	unlockTTL   time.Duration
 	allow       []netip.Prefix
@@ -87,6 +93,12 @@ type Gate struct {
 	mu       sync.Mutex
 	unlocked map[netip.Addr]time.Time
 	sources  map[netip.Addr]*source
+}
+
+// credential is one title/key pair, with the key kept as a hash.
+type credential struct {
+	title  string
+	keySum [sha256.Size]byte
 }
 
 // source is what a gate remembers about an address that is not unlocked.
@@ -112,11 +124,26 @@ func NewGate(name, proxyType string, cfg *v1.SecureConfig) (*Gate, error) {
 		return nil, fmt.Errorf("secure.trustedIPs: %w", err)
 	}
 	nameSum := sha256.Sum256([]byte(name))
-	// Tied to the proxy and its key: changing the key logs every browser out.
-	cookieKey := sha256.Sum256([]byte("frp-secure-cookie\x00" + name + "\x00" + cfg.Key))
+	var (
+		creds  []credential
+		titles []string
+		keys   []string
+	)
+	for _, c := range cfg.AllCredentials() {
+		creds = append(creds, credential{title: c.Title, keySum: sha256.Sum256([]byte(c.Key))})
+		if !slices.ContainsFunc(titles, func(t string) bool { return strings.EqualFold(t, c.Title) }) {
+			titles = append(titles, c.Title)
+		}
+		keys = append(keys, c.Key)
+	}
+	// Tied to the proxy and its keys: changing any of them logs every browser
+	// out. Sorted, so reordering the logins changes nothing.
+	slices.Sort(keys)
+	cookieKey := sha256.Sum256([]byte("frp-secure-cookie\x00" + name + "\x00" + strings.Join(keys, "\x00")))
+	rawPort := proxyType == string(v1.ProxyTypeTCP) || proxyType == string(v1.ProxyTypeTCPUDP)
 	return &Gate{
-		title:       cfg.Title,
-		keySum:      sha256.Sum256([]byte(cfg.Key)),
+		creds:       creds,
+		titles:      titles,
 		link:        cfg.HasMethod(v1.SecureMethodLink),
 		basic:       cfg.HasMethod(v1.SecureMethodBasic),
 		header:      cfg.HasMethod(v1.SecureMethodHeader),
@@ -124,7 +151,7 @@ func NewGate(name, proxyType string, cfg *v1.SecureConfig) (*Gate, error) {
 		json:        cfg.HasMethod(v1.SecureMethodJSON),
 		bearer:      cfg.HasMethod(v1.SecureMethodBearer),
 		line:        cfg.HasMethod(v1.SecureMethodLine) && v1.SecureLineApplies(proxyType),
-		pageLink:    proxyType == string(v1.ProxyTypeTCP) || proxyType == string(v1.ProxyTypeTCPUDP),
+		rawPort:     rawPort,
 		unlockTTL:   seconds(orDefault(cfg.UnlockSeconds, v1.DefaultSecureUnlockSeconds)),
 		allow:       allow,
 		trusted:     trusted,
@@ -303,11 +330,30 @@ func (g *Gate) sourceLocked(ip netip.Addr, now time.Time) *source {
 	return s
 }
 
-// keyMatches compares in constant time, over hashes so that not even the
-// key's length leaks.
-func (g *Gate) keyMatches(k string) bool {
-	sum := sha256.Sum256([]byte(k))
-	return subtle.ConstantTimeCompare(sum[:], g.keySum[:]) == 1
+// matches reports whether key belongs to a login with this title - to any
+// login when title is empty, as for a bearer token, which carries none.
+// Compared in constant time over hashes, so not even the key's length leaks,
+// and against every login, so the time taken does not say which one matched.
+func (g *Gate) matches(title, key string) bool {
+	sum := sha256.Sum256([]byte(key))
+	ok := 0
+	for _, c := range g.creds {
+		if title != "" && !strings.EqualFold(c.title, title) {
+			continue
+		}
+		ok |= subtle.ConstantTimeCompare(sum[:], c.keySum[:])
+	}
+	return ok == 1
+}
+
+// titleOf returns the title name names, compared the way header names are.
+func (g *Gate) titleOf(name string) (string, bool) {
+	for _, t := range g.titles {
+		if strings.EqualFold(t, name) {
+			return t, true
+		}
+	}
+	return "", false
 }
 
 // cookieValue is "<unix expiry>.<mac>": good for this proxy and key until the

@@ -4,6 +4,7 @@
       tip="Visitors must present the key before frps forwards anything" :readonly="readonly" />
 
     <template v-if="form.secureEnable">
+      <div class="secure-ways-title">Logins - each title and key works like a username and password</div>
       <div class="field-row two-col">
         <ConfigField label="Custom Title" type="text" v-model="form.secureTitle" prop="secureTitle"
           placeholder="dangnhap" tip="Name the key travels under, e.g. auth or dangnhap" :readonly="readonly" />
@@ -14,6 +15,26 @@
             Generate
           </ActionButton>
         </div>
+      </div>
+      <div v-for="(cred, i) in form.secureCredentials" :key="i" class="field-row two-col">
+        <ConfigField :label="`Title ${i + 2}`" type="text" v-model="cred.title" :prop="`secureCredentials.${i}.title`"
+          :rules="credentialTitleRules" placeholder="anna" :readonly="readonly" />
+        <div class="secure-key-row">
+          <ConfigField :label="`Key ${i + 2}`" type="password" v-model="cred.key" :prop="`secureCredentials.${i}.key`"
+            :rules="credentialKeyRules" placeholder="6-256 characters" class="field-grow" :readonly="readonly" />
+          <template v-if="!readonly">
+            <ActionButton variant="outline" size="small" class="secure-generate" @click="cred.key = newKey()">
+              Generate
+            </ActionButton>
+            <ActionButton variant="outline" size="small" class="secure-generate" @click="removeCredential(i)">
+              Remove
+            </ActionButton>
+          </template>
+        </div>
+      </div>
+      <div v-if="!readonly" class="secure-add-login">
+        <ActionButton variant="outline" size="small" @click="addCredential">Add login</ActionButton>
+        <span class="secure-usage-note">One per person, so one can be taken away without changing everybody else's.</span>
       </div>
 
       <div class="secure-ways-title">Ways to present the key - choose one or more</div>
@@ -77,6 +98,7 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import type { FormItemRule } from 'element-plus'
 import { secureLineApplies, type ProxyFormData } from '../../types'
 import ActionButton from '@shared/components/ActionButton.vue'
 import ConfigSection from '../ConfigSection.vue'
@@ -101,11 +123,62 @@ const form = computed({
 const KEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
 const KEY_LENGTH = 20
 
-const generateKey = () => {
+const newKey = () => {
   const bytes = new Uint32Array(KEY_LENGTH)
   crypto.getRandomValues(bytes)
-  form.value.secureKey = Array.from(bytes, (b) => KEY_ALPHABET[b % KEY_ALPHABET.length]).join('')
+  return Array.from(bytes, (b) => KEY_ALPHABET[b % KEY_ALPHABET.length]).join('')
 }
+
+const generateKey = () => {
+  form.value.secureKey = newKey()
+}
+
+const addCredential = () => {
+  form.value.secureCredentials.push({ title: '', key: newKey() })
+}
+
+const removeCredential = (i: number) => {
+  form.value.secureCredentials.splice(i, 1)
+}
+
+// The extra logins follow the first one's rules, which frpc checks again on
+// save: a title that can travel as a header, a query parameter, a form field
+// and a line prefix, and a key with nothing that would get lost on the way.
+const RESERVED_TITLES = ['host', 'cookie', 'connection', 'content-length', 'content-type', 'transfer-encoding', 'frp_title', 'frp_key']
+
+const credentialTitleRules: FormItemRule[] = [
+  {
+    validator: (_rule, value, callback) => {
+      const title: string = value || ''
+      const f = form.value
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(title)) {
+        callback(new Error('1-64 letters, digits, - or _'))
+      } else if (RESERVED_TITLES.includes(title.toLowerCase())) {
+        callback(new Error(`"${title}" is taken, choose another name`))
+      } else if ((f.secureMethodBasic || f.secureMethodBearer) && title.toLowerCase() === 'authorization') {
+        callback(new Error('"authorization" is taken by the sign-in prompt and bearer tokens'))
+      } else {
+        callback()
+      }
+    },
+    trigger: 'blur',
+  },
+]
+
+const credentialKeyRules: FormItemRule[] = [
+  {
+    validator: (_rule, value, callback) => {
+      const key: string = value || ''
+      const hasControl = [...key].some((ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f)
+      if (key.length < 6 || key.length > 256 || key.trim() !== key || hasControl) {
+        callback(new Error('6-256 characters, no leading/trailing spaces or control characters'))
+      } else {
+        callback()
+      }
+    },
+    trigger: 'blur',
+  },
+]
 
 // Switching secure access on for the first time leaves a working setup behind
 // rather than two empty required fields.
@@ -144,6 +217,13 @@ const domainOf = (f: ProxyFormData) =>
   f.customDomains.find(Boolean) ||
   (f.subdomain ? `${f.subdomain}.<subdomain-host>` : '<domain>')
 
+// A tcp proxy whose plugin terminates TLS is opened as https://, and frps
+// takes the sign-in over TLS of its own there.
+const TLS_PLUGINS = ['https2http', 'https2https']
+const behindTLS = computed(
+  () => ['tcp', 'tcp+udp'].includes(form.value.type) && TLS_PLUGINS.includes(form.value.pluginType),
+)
+
 // Where a visitor opens the unlock link. http, https and tcpmux proxies are
 // reached by domain; mc by its hostname on the game port, which is what frps
 // routes the request by; every other type answers the link on its own public
@@ -158,7 +238,7 @@ const linkBase = computed(() => {
   }
   let addr = props.remoteAddr || (f.remotePort != null ? `:${f.remotePort}` : ':<remote-port>')
   if (addr.startsWith(':')) addr = `<frps-address>${addr}`
-  return `http://${addr}`
+  return `${behindTLS.value ? 'https' : 'http'}://${addr}`
 })
 
 interface UsageItem {
@@ -212,6 +292,14 @@ const usage = computed((): UsageItem[] => {
 })
 
 const usageNote = computed(() => {
+  const more = form.value.secureCredentials.length > 0 ? ' Every login works the same way, with its own title and key.' : ''
+  return usageNoteFor() + more
+})
+
+const usageNoteFor = () => {
+  if (behindTLS.value) {
+    return 'frps answers https:// with a certificate of its own until you are signed in - accept the browser warning once - then sends you on to the site.'
+  }
   switch (form.value.type) {
     case 'http':
       return 'The link and the sign-in prompt unlock your IP (the link also sets a cookie); apps can send the header or a bearer token on every request instead.'
@@ -227,7 +315,7 @@ const usageNote = computed(() => {
     default:
       return 'Once unlocked, any app from that IP - game, RDP, SSH - connects as usual for the unlock duration. A request with the bearer token goes straight through to the backend, for API clients.'
   }
-})
+}
 
 const copy = async (text: string) => {
   try {
@@ -267,6 +355,13 @@ const copy = async (text: string) => {
 
 .secure-generate {
   margin-bottom: 2px;
+}
+
+.secure-add-login {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .secure-ways-title {

@@ -56,6 +56,14 @@ const (
 	SecureMethodLine = "line"
 )
 
+// The fields frps' own sign-in form sends a title and a key under - in the
+// query for link, in the body for form and json - besides a field named after
+// the title itself.
+const (
+	SecureFormTitleField = "frp_title"
+	SecureFormKeyField   = "frp_key"
+)
+
 // SecureMethods lists every method name a config may use.
 var SecureMethods = []string{
 	SecureMethodLink, SecureMethodBasic, SecureMethodHeader, SecureMethodForm,
@@ -107,6 +115,11 @@ type SecureConfig struct {
 	// Key is the secret itself - the "custom desc".
 	Key string `json:"key,omitempty"`
 
+	// Credentials are more title/key pairs that open the proxy, each a login
+	// of its own - one per person, say, so one can be taken away without
+	// changing everybody else's. Title and Key above are the first.
+	Credentials []SecureCredential `json:"credentials,omitempty"`
+
 	// Methods selects how the key may be presented: "link", "basic",
 	// "header", "form", "json", "bearer" and "line" - "http" being header, form
 	// and json together. Empty means DefaultSecureMethods: link, http and line.
@@ -126,6 +139,13 @@ type SecureConfig struct {
 	AntiSpam SecureAntiSpamConfig `json:"antiSpam,omitzero"`
 }
 
+// SecureCredential is one title/key pair: a username and a password, in the
+// terms of a sign-in prompt.
+type SecureCredential struct {
+	Title string `json:"title,omitempty"`
+	Key   string `json:"key,omitempty"`
+}
+
 // SecureAntiSpamConfig bans the sources that guess keys or hammer a secure
 // proxy without one. In every field 0 means the default and a negative value
 // switches that check off.
@@ -143,10 +163,19 @@ type SecureAntiSpamConfig struct {
 
 func (c SecureConfig) Clone() SecureConfig {
 	out := c
+	out.Credentials = slices.Clone(c.Credentials)
 	out.Methods = slices.Clone(c.Methods)
 	out.AllowIPs = slices.Clone(c.AllowIPs)
 	out.TrustedIPs = slices.Clone(c.TrustedIPs)
 	return out
+}
+
+// AllCredentials is every title/key pair that opens the proxy: Title and Key,
+// then Credentials.
+func (c *SecureConfig) AllCredentials() []SecureCredential {
+	out := make([]SecureCredential, 0, 1+len(c.Credentials))
+	out = append(out, SecureCredential{Title: c.Title, Key: c.Key})
+	return append(out, c.Credentials...)
 }
 
 // HasMethod reports whether the key may be presented by method m.
@@ -181,9 +210,14 @@ func (c *SecureConfig) toMsg() *msg.ProxySecure {
 	if !c.Enable {
 		return nil
 	}
+	var creds []msg.ProxySecureCredential
+	for _, cr := range c.Credentials {
+		creds = append(creds, msg.ProxySecureCredential{Title: cr.Title, Key: cr.Key})
+	}
 	return &msg.ProxySecure{
 		Title:                c.Title,
 		Key:                  c.Key,
+		Credentials:          creds,
 		Methods:              slices.Clone(c.Methods),
 		UnlockSeconds:        c.UnlockSeconds,
 		AllowIPs:             slices.Clone(c.AllowIPs),
@@ -198,10 +232,15 @@ func secureFromMsg(m *msg.ProxySecure) SecureConfig {
 	if m == nil {
 		return SecureConfig{}
 	}
+	var creds []SecureCredential
+	for _, cr := range m.Credentials {
+		creds = append(creds, SecureCredential{Title: cr.Title, Key: cr.Key})
+	}
 	return SecureConfig{
 		Enable:        true,
 		Title:         m.Title,
 		Key:           m.Key,
+		Credentials:   creds,
 		Methods:       slices.Clone(m.Methods),
 		UnlockSeconds: m.UnlockSeconds,
 		AllowIPs:      slices.Clone(m.AllowIPs),

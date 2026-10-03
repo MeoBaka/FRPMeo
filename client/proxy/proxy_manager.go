@@ -67,8 +67,11 @@ type Manager struct {
 	serverSecure atomic.Bool
 
 	// serverSecureMethods is whether it also understands the secure methods
-	// added after the first version. See msg.FeatureSecureMethods.
-	serverSecureMethods atomic.Bool
+	// added after the first version, serverSecureCredentials whether it takes
+	// more than one title/key. See msg.FeatureSecureMethods and
+	// msg.FeatureSecureCredentials.
+	serverSecureMethods     atomic.Bool
+	serverSecureCredentials atomic.Bool
 
 	ctx context.Context
 }
@@ -163,7 +166,7 @@ func (pm *Manager) HandleEvent(payload any) error {
 		if e.NewProxyMsg.Secure != nil && !pm.serverSecure.Load() {
 			return ErrSecureUnsupported
 		}
-		if err := pm.checkSecureMethods(e.NewProxyMsg.Secure); err != nil {
+		if err := pm.checkSecureFeatures(e.NewProxyMsg.Secure); err != nil {
 			return err
 		}
 

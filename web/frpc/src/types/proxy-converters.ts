@@ -261,6 +261,10 @@ function secureFormToStore(form: ProxyFormData): Record<string, any> {
   if (form.secureEnable) secure.enable = true
   if (form.secureTitle) secure.title = form.secureTitle
   if (form.secureKey) secure.key = form.secureKey
+  const credentials = form.secureCredentials
+    .filter((c) => c.title || c.key)
+    .map((c) => ({ title: c.title, key: c.key }))
+  if (credentials.length > 0) secure.credentials = credentials
 
   const methods = secureMethodsToStore(form)
   if (methods) secure.methods = methods
@@ -621,6 +625,9 @@ export function storeProxyToForm(config: ProxyDefinition): ProxyFormData {
     form.secureEnable = s.enable === true
     form.secureTitle = s.title || ''
     form.secureKey = s.key || ''
+    form.secureCredentials = Array.isArray(s.credentials)
+      ? s.credentials.map((c: any) => ({ title: c?.title || '', key: c?.key || '' }))
+      : []
     // An empty list means the first version's methods, and "http" is header,
     // form and json together.
     const methods: string[] =

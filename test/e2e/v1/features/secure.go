@@ -1,6 +1,7 @@
 package features
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/fatedier/frp/test/e2e/framework"
 	"github.com/fatedier/frp/test/e2e/framework/consts"
+	"github.com/fatedier/frp/test/e2e/pkg/cert"
 	"github.com/fatedier/frp/test/e2e/pkg/request"
 	"github.com/fatedier/frp/test/e2e/pkg/rpc"
 )
@@ -280,6 +282,83 @@ var _ = ginkgo.Describe("[Feature: Secure Access]", func() {
 				r.HTTP().HTTPHeaders(map[string]string{"Authorization": "Bearer " + secureKey})
 			}).
 			Explain("the backend's own answer, to the very request that carried the token").Ensure()
+	})
+
+	// The reported case: a tcp proxy whose TLS frpc terminates with the
+	// https2http plugin, opened as https://. frps cannot read inside that TLS,
+	// so it signs the visitor in over TLS of its own and sends them back.
+	ginkgo.It("TCP behind TLS: https:// gets the sign-in prompt", func() {
+		artifacts, err := (&cert.SelfSignedCertGenerator{}).Generate("127.0.0.1")
+		framework.ExpectNoError(err)
+		crtPath := f.WriteTempFile("plugin.crt", string(artifacts.Cert))
+		keyPath := f.WriteTempFile("plugin.key", string(artifacts.Key))
+
+		remotePort := f.AllocPort()
+		// The secure keys go before the plugin table, or TOML files them under
+		// the plugin.
+		clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+		[[proxies]]
+		name = "ollama"
+		type = "tcp"
+		remotePort = %d
+		secure.enable = true
+		secure.title = "%s"
+		secure.key = "%s"
+		secure.methods = ["basic"]
+		[proxies.plugin]
+		type = "https2http"
+		localAddr = "127.0.0.1:{{ .%s }}"
+		crtPath = "%s"
+		keyPath = "%s"
+		`, remotePort, secureTitle, secureKey, framework.HTTPSimpleServerPort, crtPath, keyPath)
+		f.RunProcesses(consts.DefaultServerConfig, []string{clientConf})
+
+		visitor := func(r *request.Request) *request.Request {
+			// A visitor who clicked through the warnings for both certificates.
+			return r.HTTPS().TLSConfig(&tls.Config{InsecureSkipVerify: true}) // #nosec G402 - see above
+		}
+
+		framework.NewRequestExpect(f).Port(remotePort).
+			RequestModify(func(r *request.Request) { visitor(r) }).
+			Explain("asked to sign in, not reset").
+			Ensure(func(resp *request.Response) bool {
+				return resp.Code == 401 && strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Basic ")
+			})
+
+		// Signed in, the client follows the redirect back to the page, which
+		// now goes through to the backend over the plugin's TLS.
+		framework.NewRequestExpect(f).Port(remotePort).
+			RequestModify(func(r *request.Request) { visitor(r).HTTPAuth(secureTitle, secureKey) }).
+			Explain("the backend's own page, after signing in").Ensure()
+	})
+
+	ginkgo.It("HTTP: more than one title and key, each a login of its own", func() {
+		vhostHTTPPort := f.AllocPort()
+		serverConf := consts.DefaultServerConfig + fmt.Sprintf(`
+		vhostHTTPPort = %d
+		`, vhostHTTPPort)
+		clientConf := consts.DefaultClientConfig + secureProxy(fmt.Sprintf(`
+		[[proxies]]
+		name = "web"
+		type = "http"
+		localPort = {{ .%s }}
+		customDomains = ["logins.example.com"]
+		`, framework.HTTPSimpleServerPort), `secure.methods = ["header"]
+		secure.credentials = [{ title = "anna", key = "anna-e2e-key" }]`)
+		f.RunProcesses(serverConf, []string{clientConf})
+
+		withHeader := func(title, key string) func(r *request.Request) {
+			return func(r *request.Request) {
+				r.HTTP().HTTPHost("logins.example.com").HTTPHeaders(map[string]string{title: key})
+			}
+		}
+
+		framework.NewRequestExpect(f).Port(vhostHTTPPort).RequestModify(withHeader(secureTitle, secureKey)).
+			Explain("the first login").Ensure()
+		framework.NewRequestExpect(f).Port(vhostHTTPPort).RequestModify(withHeader("anna", "anna-e2e-key")).
+			Explain("the second login").Ensure()
+		framework.NewRequestExpect(f).Port(vhostHTTPPort).RequestModify(withHeader("anna", secureKey)).
+			Explain("a key only opens its own login").Ensure(framework.ExpectResponseCode(403))
 	})
 
 	ginkgo.It("UDP: dropped until a link on the same port unlocks the address", func() {

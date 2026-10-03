@@ -295,7 +295,19 @@ http proxy's own `httpUser`/`httpPassword`, which read the same `Authorization` 
 Games, RDP and SSH cannot send a key themselves, so the usual flow is: open the link once, then
 connect as normal. frps serves the link on the proxy's own port — for `udp`/`pe` it listens on TCP
 with the same port number, for `mc` it routes the request by its `Host` like a handshake, and for
-`https` it is served on frps' `vhostHTTPPort` for the proxy's domain.
+`https` it is served on frps' `vhostHTTPPort` for the proxy's domain. The sign-in page asks for the
+title and the key like a username and password.
+
+A `tcp` or `tcp+udp` proxy whose backend speaks TLS — a web server, or frpc's `https2http` plugin — can
+be opened as `https://` too. frps cannot open that TLS, so until the visitor is signed in it answers
+with a self-signed certificate of its own (kept in `.autogen_secure_tls.pem` next to frps), shows the
+sign-in, then redirects back, and from then on the connection goes straight to the backend. The
+browser warns about frps' certificate once.
+
+More than one login: `secure.credentials` adds title/key pairs next to `secure.title`/`secure.key`,
+each opening the proxy on its own — one per person, so one can be taken away without changing
+everybody else's. A key only works under its own title; a bearer token, which carries no title, may be
+any login's key.
 
 ```toml
 [[proxies]]
@@ -306,6 +318,7 @@ remotePort = 25565
 secure.enable = true
 secure.title = "dangnhap"
 secure.key = "change-me-please"
+# secure.credentials = [{ title = "anna", key = "another-key" }]  # more logins
 # secure.methods = ["link", "basic", "bearer"]  # empty = link, http and line
 # secure.unlockSeconds = 43200               # 12 hours
 # secure.allowIPs = ["203.0.113.0/24"]       # only these may connect, and they still need the key

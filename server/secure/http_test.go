@@ -97,7 +97,10 @@ func TestBrowsersWithoutAKeyGetTheLoginPage(t *testing.T) {
 
 	d := g.CheckHTTP(req)
 	require.Equal(t, http.StatusUnauthorized, d.StatusCode)
-	require.Contains(t, string(d.Body), `name="dangnhap"`)
+	// Asked for like a username and a password, never written into the page.
+	require.Contains(t, string(d.Body), `name="frp_title"`)
+	require.Contains(t, string(d.Body), `name="frp_key"`)
+	require.NotContains(t, string(d.Body), testTitle)
 	require.Contains(t, string(d.Body), `method="post"`)
 	require.Equal(t, "text/html; charset=utf-8", d.Header.Get("Content-Type"))
 }

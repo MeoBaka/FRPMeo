@@ -32,21 +32,21 @@ func isSecureUnsupported(err error) bool {
 	return errors.Is(err, ErrSecureUnsupported)
 }
 
-// secureMethodsError is returned for a secure proxy using methods an frps
-// without msg.FeatureSecureMethods does not know. That frps would refuse the
-// proxy rather than expose it, so this is about saying why before asking: the
-// answer it would give names a validation rule, not the version to install.
-// It counts as ErrSecureUnsupported, so it fails the start the same way.
-type secureMethodsError struct {
-	methods []string
+// secureFeatureError is returned for a secure proxy using something this frps
+// did not advertise: methods without msg.FeatureSecureMethods, more than one
+// title/key without msg.FeatureSecureCredentials. Neither would expose the
+// proxy - the frps refuses the one and ignores the other - so this is about
+// saying what to update before anybody wonders why a login does not work. It
+// counts as ErrSecureUnsupported, so it fails the start the same way.
+type secureFeatureError struct {
+	what string
 }
 
-func (e *secureMethodsError) Error() string {
-	return "frps does not understand the secure methods " + strings.Join(e.methods, ", ") +
-		"; update frps before using them on this proxy"
+func (e *secureFeatureError) Error() string {
+	return "frps does not support " + e.what + "; update frps before using it on this proxy"
 }
 
-func (e *secureMethodsError) Is(target error) bool {
+func (e *secureFeatureError) Is(target error) bool {
 	return target == ErrSecureUnsupported
 }
 
@@ -55,15 +55,22 @@ func (e *secureMethodsError) Is(target error) bool {
 func (pm *Manager) SetServerFeatures(features []string) {
 	pm.serverSecure.Store(slices.Contains(features, msg.FeatureSecureProxy))
 	pm.serverSecureMethods.Store(slices.Contains(features, msg.FeatureSecureMethods))
+	pm.serverSecureCredentials.Store(slices.Contains(features, msg.FeatureSecureCredentials))
 }
 
-// checkSecureMethods fails a secure proxy whose methods frps would not know.
-func (pm *Manager) checkSecureMethods(s *msg.ProxySecure) error {
-	if s == nil || pm.serverSecureMethods.Load() {
+// checkSecureFeatures fails a secure proxy that relies on something frps did
+// not advertise.
+func (pm *Manager) checkSecureFeatures(s *msg.ProxySecure) error {
+	if s == nil {
 		return nil
 	}
-	if newer := v1.NewerSecureMethods(s.Methods); len(newer) > 0 {
-		return &secureMethodsError{methods: newer}
+	if !pm.serverSecureMethods.Load() {
+		if newer := v1.NewerSecureMethods(s.Methods); len(newer) > 0 {
+			return &secureFeatureError{what: "the secure methods " + strings.Join(newer, ", ")}
+		}
+	}
+	if len(s.Credentials) > 0 && !pm.serverSecureCredentials.Load() {
+		return &secureFeatureError{what: "more than one secure title/key"}
 	}
 	return nil
 }

@@ -27,6 +27,7 @@ func fullSecureConfig() SecureConfig {
 		Enable:        true,
 		Title:         "auth",
 		Key:           "secret123",
+		Credentials:   []SecureCredential{{Title: "anna", Key: "anna-key-1"}},
 		Methods:       []string{SecureMethodLink, SecureMethodLine},
 		UnlockSeconds: 60,
 		AllowIPs:      []string{"10.0.0.0/8"},
@@ -66,6 +67,7 @@ func TestSecureCloneSharesNoLists(t *testing.T) {
 	orig := ProxyBaseConfig{Secure: fullSecureConfig()}
 	clone := orig.Clone()
 
+	clone.Secure.Credentials[0].Key = "changed"
 	clone.Secure.Methods[0] = "changed"
 	clone.Secure.AllowIPs[0] = "changed"
 	clone.Secure.TrustedIPs[0] = "changed"
@@ -114,4 +116,12 @@ func TestNewerSecureMethods(t *testing.T) {
 	require.Empty(t, NewerSecureMethods([]string{SecureMethodLink, SecureMethodHTTP, SecureMethodLine}))
 	require.Equal(t, []string{SecureMethodBasic, SecureMethodForm},
 		NewerSecureMethods([]string{SecureMethodLink, SecureMethodBasic, SecureMethodForm, SecureMethodBasic}))
+}
+
+func TestAllCredentialsStartsWithTitleAndKey(t *testing.T) {
+	c := fullSecureConfig()
+	require.Equal(t, []SecureCredential{{Title: "auth", Key: "secret123"}, {Title: "anna", Key: "anna-key-1"}}, c.AllCredentials())
+
+	c.Credentials = nil
+	require.Equal(t, []SecureCredential{{Title: "auth", Key: "secret123"}}, c.AllCredentials())
 }

@@ -87,8 +87,15 @@ function describeSecure(s: any): string {
       ? s.methods
       : ['link', 'http', 'line']
   const hours = (s.unlockSeconds || 43200) / 3600
+  // Every login's title; the keys never leave frps.
+  const titles: string[] = [
+    s.title,
+    ...(Array.isArray(s.credentials) ? s.credentials.map((c: any) => c?.title) : []),
+  ].filter(Boolean)
   const parts = [
-    `title "${s.title}"`,
+    titles.length > 1
+      ? `${titles.length} logins (${titles.map((t) => `"${t}"`).join(', ')})`
+      : `title "${s.title}"`,
     methods.map((m) => SECURE_METHOD_LABELS[m] || m).join(', '),
     `unlock ${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`,
   ]

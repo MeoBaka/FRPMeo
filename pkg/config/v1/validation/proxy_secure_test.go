@@ -99,6 +99,22 @@ func TestValidateSecureConfig(t *testing.T) {
 			b.Secure.Title = "authorization"
 			b.Secure.Methods = []string{"header"}
 		})},
+		{name: "more logins", base: secureBase("tcp", func(b *v1.ProxyBaseConfig) {
+			b.Secure.Credentials = []v1.SecureCredential{{Title: "anna", Key: "anna-key-1"}, {Title: "bob", Key: "bob-key-1"}}
+		})},
+		{name: "every login follows the title rules", base: secureBase("tcp", func(b *v1.ProxyBaseConfig) {
+			b.Secure.Credentials = []v1.SecureCredential{{Title: "anna", Key: "anna-key-1"}, {Title: "bad title", Key: "bob-key-1"}}
+		}), wantErr: "secure.credentials[1].title"},
+		{name: "and the key rules", base: secureBase("tcp", func(b *v1.ProxyBaseConfig) {
+			b.Secure.Credentials = []v1.SecureCredential{{Title: "anna", Key: "abc"}}
+		}), wantErr: "secure.credentials[0].key"},
+		{name: "a login titled like the sign-in form's fields", base: secureBase("tcp", func(b *v1.ProxyBaseConfig) {
+			b.Secure.Credentials = []v1.SecureCredential{{Title: "frp_key", Key: "anna-key-1"}}
+		}), wantErr: "sign-in form"},
+		{name: "authorization stays reserved for every login", base: secureBase("tcp", func(b *v1.ProxyBaseConfig) {
+			b.Secure.Methods = []string{"basic"}
+			b.Secure.Credentials = []v1.SecureCredential{{Title: "Authorization", Key: "anna-key-1"}}
+		}), wantErr: "secure.credentials[0].title"},
 		{name: "negative unlock", base: secureBase("tcp", func(b *v1.ProxyBaseConfig) {
 			b.Secure.UnlockSeconds = -1
 		}), wantErr: "unlockSeconds"},

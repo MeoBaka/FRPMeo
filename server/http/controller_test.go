@@ -28,6 +28,7 @@ package http
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,5 +127,36 @@ func TestBuildClientInfoRespIncludesWireProtocol(t *testing.T) {
 
 	if resp.WireProtocol != wire.ProtocolV2 {
 		t.Fatalf("wire protocol mismatch, want %q got %q", wire.ProtocolV2, resp.WireProtocol)
+	}
+}
+
+// The dashboard can see that a proxy is locked and by which titles, never with
+// which keys - and redacting them must not reach into the running proxy.
+func TestGetConfFromConfigurerHidesEverySecureKey(t *testing.T) {
+	cfg := &v1.TCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name: "locked",
+			Type: "tcp",
+			Secure: v1.SecureConfig{
+				Enable: true, Title: "auth", Key: "first-key",
+				Credentials: []v1.SecureCredential{{Title: "anna", Key: "anna-key"}},
+			},
+		},
+	}
+
+	content, err := json.Marshal(getConfFromConfigurer(cfg))
+	if err != nil {
+		t.Fatalf("marshal conf failed: %v", err)
+	}
+	for _, key := range []string{"first-key", "anna-key"} {
+		if strings.Contains(string(content), key) {
+			t.Fatalf("the dashboard was handed a secure key: %s", content)
+		}
+	}
+	if !strings.Contains(string(content), `"anna"`) {
+		t.Fatalf("the titles should still show: %s", content)
+	}
+	if cfg.Secure.Credentials[0].Key != "anna-key" || cfg.Secure.Key != "first-key" {
+		t.Fatal("redacting for the dashboard changed the running proxy's keys")
 	}
 }

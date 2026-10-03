@@ -1,6 +1,6 @@
 <template>
   <!-- Edit mode: use el-form-item for validation -->
-  <el-form-item v-if="!readonly" :label="label" :prop="prop" :class="($attrs.class as string)">
+  <el-form-item v-if="!readonly" :label="label" :prop="prop" :rules="rules" :class="($attrs.class as string)">
     <!-- text -->
     <el-input
       v-if="type === 'text'"
@@ -113,6 +113,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import type { FormItemRule } from 'element-plus'
 import KeyValueEditor from './KeyValueEditor.vue'
 import StringListEditor from './StringListEditor.vue'
 import PopoverMenu from '@shared/components/PopoverMenu.vue'
@@ -128,6 +129,9 @@ const props = withDefaults(
     disabled?: boolean
     tip?: string
     prop?: string
+    // Rules for a field the form's own rules cannot name ahead of time - one
+    // row of a list, say.
+    rules?: FormItemRule[]
     options?: Array<{ label: string; value: string | number }>
     min?: number
     max?: number
@@ -142,6 +146,7 @@ const props = withDefaults(
     disabled: false,
     tip: '',
     prop: '',
+    rules: undefined,
     options: () => [],
     min: undefined,
     max: undefined,

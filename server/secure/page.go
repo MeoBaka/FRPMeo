@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/util/vhost"
 )
 
@@ -100,10 +101,10 @@ func challenge(a answer) answer {
 	return a
 }
 
-// loginPage asks for the key. With basic on, a browser shows its sign-in
-// prompt for it, and the page is what it shows if the visitor cancels. The
-// page's own form posts the key as a field when form is on, and puts it in the
-// query - a link - when only link is.
+// loginPage asks for a title and a key. With basic on, a browser shows its
+// sign-in prompt for them, and the page is what it shows if the visitor
+// cancels. The page's own form posts the pair as fields when form is on, and
+// puts them in the query - a link - when only link is.
 func (g *Gate) loginPage(req *http.Request) answer {
 	a := g.loginBody(req)
 	if g.basic {
@@ -131,29 +132,60 @@ func (g *Gate) loginBody(req *http.Request) answer {
 		}
 		return textAnswer(http.StatusUnauthorized, g.howTo())
 	}
-	form := `<p>Nhập key để mở khóa.<br>Enter the key to unlock.</p>` +
+	// The title is asked for like a username rather than written into the
+	// page: it is half of a login, and with more than one there is no telling
+	// which.
+	form := `<p>Đăng nhập để mở khóa.<br>Sign in to unlock.</p>` +
 		`<form method="` + method + `">` +
-		`<input type="password" name="` + html.EscapeString(g.title) + `" placeholder="key" autofocus autocomplete="current-password">` +
-		`<button type="submit">Mở khóa / Unlock</button></form>`
+		`<input name="` + v1.SecureFormTitleField + `" placeholder="title" autocomplete="username" autofocus required>` +
+		`<input type="password" name="` + v1.SecureFormKeyField + `" placeholder="key" autocomplete="current-password" required>` +
+		`<button type="submit">Đăng nhập / Sign in</button></form>`
 	return htmlAnswer(http.StatusUnauthorized, "Secure access", form)
 }
 
-// howTo tells a client that is not a browser how this proxy takes the key.
+// howTo tells a client that is not a browser how this proxy takes a key. It
+// names the ways, not the titles: a title is half of a login.
 func (g *Gate) howTo() string {
 	var ways []string
-	if g.link || g.header || g.form || g.json {
-		ways = append(ways, fmt.Sprintf("as %q", g.title))
+	if g.link {
+		ways = append(ways, "?<title>=<key>")
+	}
+	if g.header {
+		ways = append(ways, "a <title>: <key> header")
+	}
+	if g.form {
+		ways = append(ways, "a <title>=<key> form field")
+	}
+	if g.json {
+		ways = append(ways, `a {"<title>": "<key>"} JSON body`)
 	}
 	if g.basic {
-		ways = append(ways, "by basic auth with the title as the username")
+		ways = append(ways, "basic auth with the title as the username")
 	}
 	if g.bearer {
-		ways = append(ways, "as Authorization: Bearer <key>")
+		ways = append(ways, "Authorization: Bearer <key>")
 	}
 	if len(ways) == 0 {
-		return "secure access: this address needs the key\n"
+		return "secure access: this address needs a key\n"
 	}
-	return "secure access: send the key " + strings.Join(ways, ", or ") + "\n"
+	return "secure access: send your title and key as " + strings.Join(ways, ", or ") + "\n"
+}
+
+// redirectBack sends a visitor who has just unlocked their address back to
+// what they asked for, which now goes through: the same request again for a
+// key that rides on every request, a plain GET after a link or a form, which
+// were the sign-in itself.
+func (g *Gate) redirectBack(req *http.Request, v via) answer {
+	status := http.StatusTemporaryRedirect
+	switch v {
+	case viaLink:
+		status = http.StatusFound
+	case viaBody:
+		status = http.StatusSeeOther
+	}
+	h := make(http.Header, 1)
+	h.Set("Location", g.withoutKey(req.URL))
+	return answer{status: status, header: h}
 }
 
 // wrongKey answers a key that did not match. Basic credentials are asked for
@@ -175,9 +207,10 @@ func wrongKeyPage(req *http.Request) answer {
 			`The key is wrong. Repeated wrong keys get your address banned for a while.</p>`)
 }
 
-// unlockedPage confirms an unlock. pageLink adds a link to the page the request
-// asked for, without the key, for a port whose backend may be that website.
-func (g *Gate) unlockedPage(req *http.Request, ip netip.Addr, pageLink bool) answer {
+// unlockedPage confirms an unlock. links adds links to the page the request
+// asked for, without the key, for a port whose backend may be that website:
+// over http and over https, since frps cannot tell which the backend speaks.
+func (g *Gate) unlockedPage(req *http.Request, ip netip.Addr, links bool) answer {
 	d := humanDuration(g.unlockTTL)
 	if !wantsHTML(req) {
 		return textAnswer(http.StatusOK, fmt.Sprintf("unlocked %s for %s\n", ip, d))
@@ -185,10 +218,28 @@ func (g *Gate) unlockedPage(req *http.Request, ip netip.Addr, pageLink bool) ans
 	who := html.EscapeString(ip.String())
 	inner := `<p>IP ` + who + ` được vào trong ` + d + `. Bạn có thể kết nối ngay.<br>` +
 		who + ` may connect for ` + d + `. You can connect now.</p>`
-	if pageLink {
-		inner += `<p><a href="` + html.EscapeString(g.withoutKey(req.URL)) + `">Mở trang web / Open the website</a></p>`
+	if links {
+		inner += `<p>Mở trang web / Open the website: ` + pageLinks(req.Host, g.withoutKey(req.URL)) + `</p>`
 	}
 	return htmlAnswer(http.StatusOK, "Đã mở khóa / Unlocked", inner)
+}
+
+// pageLinks links to path on host over http and https. A Host header that is
+// not a plain host and port gets one relative link instead: it came from the
+// visitor, and only goes into the page escaped.
+func pageLinks(host, path string) string {
+	link := func(href, text string) string {
+		return `<a href="` + html.EscapeString(href) + `">` + text + `</a>`
+	}
+	hostChar := func(r rune) bool {
+		return r == '.' || r == ':' || r == '-' || r == '[' || r == ']' ||
+			(r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+	}
+	plain := host != "" && !strings.ContainsFunc(host, func(r rune) bool { return !hostChar(r) })
+	if !plain {
+		return link(path, "mở / open")
+	}
+	return link("http://"+host+path, "http") + " · " + link("https://"+host+path, "https")
 }
 
 func textAnswer(status int, body string) answer {

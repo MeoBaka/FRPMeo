@@ -120,7 +120,8 @@ func TestARequestWithoutAKeyGetsTheLoginPage(t *testing.T) {
 
 	r := <-res
 	require.Equal(t, http.StatusUnauthorized, r.status)
-	require.Contains(t, r.body, `name="dangnhap"`)
+	require.Contains(t, r.body, `name="frp_title"`)
+	require.NotContains(t, r.body, testTitle)
 	require.Equal(t, unknown, g.standingOf(visitor))
 }
 

@@ -464,10 +464,19 @@ func matchStatusFilter(online bool, filter string) bool {
 func getConfFromConfigurer(cfg v1.ProxyConfigurer) any {
 	outBase := model.BaseOutConf{ProxyBaseConfig: *cfg.GetBaseConfig()}
 
-	// The secure key is what visitors prove they know; the dashboard can say a
-	// proxy has one without handing it to everyone who can open the page.
-	// outBase is a copy, so this leaves the running proxy's config alone.
+	// The secure keys are what visitors prove they know; the dashboard can say
+	// a proxy has them without handing them to everyone who can open the
+	// page. outBase is a copy, so this leaves the running proxy's config
+	// alone - except for the credentials, whose slice it shares, hence the
+	// clone.
 	outBase.Secure.Key = ""
+	if len(outBase.Secure.Credentials) > 0 {
+		creds := slices.Clone(outBase.Secure.Credentials)
+		for i := range creds {
+			creds[i].Key = ""
+		}
+		outBase.Secure.Credentials = creds
+	}
 
 	switch c := cfg.(type) {
 

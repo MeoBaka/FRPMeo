@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/util/vhost"
 )
 
@@ -43,8 +44,8 @@ func (g *Gate) CheckHTTP(req *http.Request) vhost.AllowDecision {
 	// Honored even for an admitted source, so the key is never passed on to
 	// the backend in a URL.
 	if g.link {
-		if key, found := g.queryKey(req); found {
-			return g.unlockAndRedirect(req, ip, key, http.StatusFound)
+		if p, found := g.queryKey(req); found {
+			return g.unlockAndRedirect(req, ip, p, http.StatusFound)
 		}
 	}
 	if st == admitted || g.hasValidCookie(req) {
@@ -55,12 +56,12 @@ func (g *Gate) CheckHTTP(req *http.Request) vhost.AllowDecision {
 	// the way for apps and scripts that keep no cookies, or the credentials a
 	// browser repeats after its prompt - proves itself each time, so the right
 	// one is never counted.
-	if key, v, found := g.everyRequestKey(req); found {
-		if !g.keyMatches(key) {
+	if p, found := g.everyRequestKey(req); found {
+		if !g.valid(p) {
 			g.noteFailure(ip)
-			return g.wrongKey(req, v).decision()
+			return g.wrongKey(req, p.via).decision()
 		}
-		if v == viaBasic {
+		if p.via == viaBasic {
 			// Unlocked as well. The browser keeps repeating the credentials,
 			// but if the backend asks for a sign-in of its own, whatever the
 			// visitor types there replaces them.
@@ -73,8 +74,8 @@ func (g *Gate) CheckHTTP(req *http.Request) vhost.AllowDecision {
 		return vhost.AllowDecision{StatusCode: http.StatusForbidden}
 	}
 	if req.Method == http.MethodPost {
-		if key, found := g.bodyKey(req); found {
-			return g.unlockAndRedirect(req, ip, key, http.StatusSeeOther)
+		if p, found := g.bodyKey(req); found {
+			return g.unlockAndRedirect(req, ip, p, http.StatusSeeOther)
 		}
 	}
 	return g.loginPage(req).decision()
@@ -89,14 +90,14 @@ func (g *Gate) ServeKnock(rw http.ResponseWriter, req *http.Request) {
 		http.Error(rw, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
-	g.knock(req, ip, false).serve(rw)
+	g.knock(req, ip, showUnlocked).serve(rw)
 }
 
 // unlockAndRedirect judges a key from a link or the login form. The right one
 // unlocks the source and sets a cookie - which keeps a browser in when its
 // address changes - then sends it back to the page without the key in the URL.
-func (g *Gate) unlockAndRedirect(req *http.Request, ip netip.Addr, key string, status int) vhost.AllowDecision {
-	if !g.keyMatches(key) {
+func (g *Gate) unlockAndRedirect(req *http.Request, ip netip.Addr, p presented, status int) vhost.AllowDecision {
+	if !g.valid(p) {
 		g.noteFailure(ip)
 		return wrongKeyPage(req).decision()
 	}
@@ -125,7 +126,9 @@ func (g *Gate) hasValidCookie(req *http.Request) bool {
 // the key header, the Authorization header when it carries this proxy's
 // credentials rather than the backend's, and the unlock cookie.
 func (g *Gate) strip(req *http.Request) {
-	req.Header.Del(g.title)
+	for _, t := range g.titles {
+		req.Header.Del(t)
+	}
 	if g.ownsAuthorization(req) {
 		req.Header.Del("Authorization")
 	}
@@ -148,13 +151,15 @@ func (g *Gate) strip(req *http.Request) {
 	}
 }
 
-// withoutKey is the request's path and query with the key parameter taken out.
-// The path always starts with a single slash: "//host" in a Location header
-// would send the browser to another site.
+// withoutKey is the request's path and query with the key parameters taken
+// out: those named after a title, and the sign-in form's. The path always
+// starts with a single slash: "//host" in a Location header would send the
+// browser to another site.
 func (g *Gate) withoutKey(u *url.URL) string {
 	q := u.Query()
 	for name := range q {
-		if strings.EqualFold(name, g.title) {
+		if _, ok := g.titleOf(name); ok ||
+			strings.EqualFold(name, v1.SecureFormTitleField) || strings.EqualFold(name, v1.SecureFormKeyField) {
 			q.Del(name)
 		}
 	}

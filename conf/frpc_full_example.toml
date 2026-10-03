@@ -246,6 +246,10 @@ remotePort = 6010
 #   line:   "dangnhap: YOUR_KEY" as the first line of the connection, with the
 #           rest going to the backend - for clients you write yourself
 #   http:   header, form and json together
+# The sign-in page asks for a title and key like a username and password. On a
+# tcp proxy whose backend speaks TLS (the https2http plugin, say), https:// works
+# too: frps signs the visitor in with a self-signed certificate of its own, then
+# sends them on to the backend.
 # Works for tcp, udp, http, https, tcpmux, tcp+udp, mc and pe proxies, but not in
 # a loadBalancer group. frpc will not start the proxy on an frps without support.
 secure.enable = true
@@ -253,6 +257,8 @@ secure.enable = true
 secure.title = "dangnhap"
 # The key itself, 6-256 characters
 secure.key = "change-me-please"
+# More logins, each a title and key that opens the proxy on its own
+# secure.credentials = [{ title = "anna", key = "another-key-please" }]
 # Accepted ways; empty means link, http and line - basic and bearer only when listed
 # secure.methods = ["link", "basic", "header", "form", "json", "bearer", "line"]
 # How long an unlocked IP stays unlocked, default 43200 (12 hours)

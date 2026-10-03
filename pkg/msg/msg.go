@@ -183,12 +183,22 @@ const FeatureSecureProxy = "secure-proxy"
 // unknown, so frpc stops such a proxy itself and says why.
 const FeatureSecureMethods = "secure-methods"
 
+// FeatureSecureCredentials is advertised by an frps that takes more than one
+// title/key pair for a secure proxy. An older one ignores
+// ProxySecure.Credentials, which locks out everyone but the first login - not
+// unsafe, but not what was asked for, so frpc says so instead.
+const FeatureSecureCredentials = "secure-credentials" // #nosec G101 - a feature name, not a credential
+
 // ProxySecure is the wire form of a proxy's secure access settings: a visitor
 // has to present "<title>: <key>" before frps forwards anything.
 type ProxySecure struct {
 	Title string `json:"title,omitempty"`
 
 	Key string `json:"key,omitempty"`
+
+	// Credentials are the title/key pairs after the first. See
+	// FeatureSecureCredentials.
+	Credentials []ProxySecureCredential `json:"credentials,omitempty"`
 
 	Methods []string `json:"methods,omitempty"`
 
@@ -203,6 +213,13 @@ type ProxySecure struct {
 	MaxAttemptsPerMinute int `json:"max_attempts_per_minute,omitempty"`
 
 	BanSeconds int `json:"ban_seconds,omitempty"`
+}
+
+// ProxySecureCredential is one more title/key pair of a secure proxy.
+type ProxySecureCredential struct {
+	Title string `json:"title,omitempty"`
+
+	Key string `json:"key,omitempty"`
 }
 
 // When frpc login success, send this message to frps for running a new proxy.

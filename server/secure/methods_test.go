@@ -230,7 +230,8 @@ func TestClientsThatAreNotBrowsersAreToldHow(t *testing.T) {
 
 	g, _ = newTestGate(t, methods("header"), "http")
 	d = g.CheckHTTP(httptest.NewRequest(http.MethodGet, "http://example.com/", nil))
-	require.Contains(t, string(d.Body), `"dangnhap"`)
+	require.Contains(t, string(d.Body), "<title>: <key> header")
+	require.NotContains(t, string(d.Body), testTitle, "the ways are named, not the titles: a title is half a login")
 }
 
 // --- on a raw port ---
@@ -283,7 +284,8 @@ func TestBasicUnlocksARawPort(t *testing.T) {
 	r = <-res
 	require.NoError(t, r.err)
 	require.Equal(t, http.StatusOK, r.status)
-	require.Contains(t, r.body, `href="/app"`, "a way back to the page")
+	require.Contains(t, r.body, `href="http://example.com/app"`, "a way back to the page")
+	require.Contains(t, r.body, `href="https://example.com/app"`, "over https too, for a backend behind TLS")
 	require.Equal(t, admitted, g.standingOf(visitor))
 }
 
@@ -358,7 +360,7 @@ func TestWithoutKeyHeadersTakesOutOnlyTheKey(t *testing.T) {
 func TestTheUnlockedPageLinksBackOnRawPortsOnly(t *testing.T) {
 	for typ, want := range map[string]bool{"tcp": true, "tcp+udp": true, "mc": false, "udp": false, "https": false} {
 		g, _ := newTestGate(t, v1.SecureConfig{}, typ)
-		require.Equal(t, want, g.pageLink, typ)
+		require.Equal(t, want, g.rawPort, typ)
 	}
 }
 

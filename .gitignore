@@ -27,6 +27,8 @@ client.crt
 client.key
 # frps writes its firewall state wherever it is run from
 frps_firewall.json
+# and the certificate secure proxies take TLS sign-ins with
+.autogen_secure_tls.pem
 
 node_modules/
 
